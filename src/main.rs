@@ -1,11 +1,11 @@
+use crate::lexer::{tokenize, Buf};
 use std::io;
 use std::io::{BufRead, Write};
-use crate::lexer::{Buf, tokenize};
 
 pub(crate) mod error;
-pub(crate) mod token;
 pub(crate) mod lexer;
 pub(crate) mod parser;
+pub(crate) mod token;
 
 fn main() {
     let stdin = io::stdin();
@@ -22,7 +22,8 @@ fn main() {
 
         let tokens = {
             let mut buf = Buf::new(&line);
-            tokenize(&mut buf).unwrap_or_default()
+            tokenize(&mut buf)
+                .unwrap_or_default()
                 .into_iter()
                 .map(|t| format!("\t{:?}", t))
                 .collect::<Vec<_>>()

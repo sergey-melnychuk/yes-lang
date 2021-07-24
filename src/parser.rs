@@ -1,4 +1,3 @@
-
 enum Expression {
     Const(String),
     Prefix(Operator, Box<Expression>),
@@ -27,7 +26,12 @@ impl Operator {
         match self {
             Operator::Mul | Operator::Div | Operator::Mod | Operator::Not => 4,
             Operator::Add | Operator::Sub => 3,
-            Operator::Eq  | Operator::Ne | Operator::Lt | Operator::Lte | Operator::Gt | Operator::Gte => 2,
+            Operator::Eq
+            | Operator::Ne
+            | Operator::Lt
+            | Operator::Lte
+            | Operator::Gt
+            | Operator::Gte => 2,
             Operator::Bind => 1,
         }
     }

@@ -1,5 +1,5 @@
-use crate::token::Token;
 use crate::error::TokenError;
+use crate::token::Token;
 
 pub(crate) const LET: &'static str = "let";
 pub(crate) const IF: &'static str = "if";
@@ -23,7 +23,6 @@ pub(crate) const GTE: &'static str = ">=";
 pub(crate) const GT: &'static str = ">";
 pub(crate) const BIND: &'static str = "=";
 
-
 fn is_keyword(token: &str) -> bool {
     token == LET
         || token == IF
@@ -39,7 +38,15 @@ fn is_delimiter(c: char) -> bool {
 }
 
 fn is_operator(c: char) -> bool {
-    c == '+' || c == '-' || c == '*' || c == '/' || c == '%' || c == '=' || c == '!' || c == '>' || c == '<'
+    c == '+'
+        || c == '-'
+        || c == '*'
+        || c == '/'
+        || c == '%'
+        || c == '='
+        || c == '!'
+        || c == '>'
+        || c == '<'
 }
 
 fn is_quoted(token: &str) -> bool {
@@ -48,7 +55,8 @@ fn is_quoted(token: &str) -> bool {
 
 fn is_identifier(token: &str) -> bool {
     let mut chars = token.chars();
-    let first_char_is_alphabetic_or_underscore = chars.next()
+    let first_char_is_alphabetic_or_underscore = chars
+        .next()
         .map(|c| c.is_ascii_alphabetic() || c == '_')
         .unwrap_or_default();
     first_char_is_alphabetic_or_underscore && chars.all(|c| c.is_ascii_alphanumeric())
@@ -69,7 +77,7 @@ fn match_operator(next: char, peek: Option<char>) -> Result<Token, TokenError> {
         ('!', _) => Ok(Token::Operator(NOT)),
         ('=', Some('=')) => Ok(Token::Operator(EQ)),
         ('=', _) => Ok(Token::Operator(BIND)),
-        _ => Err(TokenError::Unexpected(format!("{}", next)))
+        _ => Err(TokenError::Unexpected(format!("{}", next))),
     }
 }
 
@@ -118,7 +126,7 @@ pub(crate) fn tokenize<I: Iter<char>>(buf: &mut I) -> Result<Vec<Token>, TokenEr
                     FN => Token::Keyword(FN),
                     TRUE => Token::Keyword(TRUE),
                     FALSE => Token::Keyword(FALSE),
-                    unexpected => return Err(TokenError::Unexpected(unexpected.to_string()))
+                    unexpected => return Err(TokenError::Unexpected(unexpected.to_string())),
                 };
                 tokens.push(token);
                 this.clear();
@@ -175,69 +183,85 @@ mod tests {
     #[test]
     fn test_tokenizer() {
         let tests = vec![
-            ("let abc = 123;",
-             vec![
-                 Token::Keyword(LET),
-                 Token::Identifier("abc".to_string()),
-                 Token::Operator(BIND),
-                 Token::Literal("123".to_string()),
-                 Token::Delimiter(';'),
-                 Token::EOF,
-             ]),
-            ("fn(a, b) {a - b}",
-             vec![
-                 Token::Keyword(FN),
-                 Token::Delimiter('('),
-                 Token::Identifier("a".to_string()),
-                 Token::Delimiter(','),
-                 Token::Identifier("b".to_string()),
-                 Token::Delimiter(')'),
-                 Token::Delimiter('{'),
-                 Token::Identifier("a".to_string()),
-                 Token::Operator(SUB),
-                 Token::Identifier("b".to_string()),
-                 Token::Delimiter('}'),
-                 Token::EOF,
-             ]),
-            ("let z = (fn(x, y) { x % y })(10, 3);",
-             vec![
-                 Token::Keyword(LET),
-                 Token::Identifier("z".to_string()),
-                 Token::Operator(BIND),
-                 Token::Delimiter('('),
-                 Token::Keyword(FN),
-                 Token::Delimiter('('),
-                 Token::Identifier("x".to_string()),
-                 Token::Delimiter(','),
-                 Token::Identifier("y".to_string()),
-                 Token::Delimiter(')'),
-                 Token::Delimiter('{'),
-                 Token::Identifier("x".to_string()),
-                 Token::Operator(MOD),
-                 Token::Identifier("y".to_string()),
-                 Token::Delimiter('}'),
-                 Token::Delimiter(')'),
-                 Token::Delimiter('('),
-                 Token::Literal("10".to_string()),
-                 Token::Delimiter(','),
-                 Token::Literal("3".to_string()),
-                 Token::Delimiter(')'),
-                 Token::Delimiter(';'),
-                 Token::EOF
-             ]),
-            ("fn(x){x*2}",
-            vec![
-                 Token::Keyword("fn"),
-                 Token::Delimiter('('),
-                 Token::Identifier("x".to_string()),
-                 Token::Delimiter(')'),
-                 Token::Delimiter('{'),
-                 Token::Identifier("x".to_string()),
-                 Token::Operator("*"),
-                 Token::Literal("2".to_string()),
-                 Token::Delimiter('}'),
-                 Token::EOF
-            ]),
+            (
+                "let abc = 123;",
+                vec![
+                    Token::Keyword(LET),
+                    Token::Identifier("abc".to_string()),
+                    Token::Operator(BIND),
+                    Token::Literal("123".to_string()),
+                    Token::Delimiter(';'),
+                    Token::EOF,
+                ],
+            ),
+            (
+                "fn(a, b) {a - b}",
+                vec![
+                    Token::Keyword(FN),
+                    Token::Delimiter('('),
+                    Token::Identifier("a".to_string()),
+                    Token::Delimiter(','),
+                    Token::Identifier("b".to_string()),
+                    Token::Delimiter(')'),
+                    Token::Delimiter('{'),
+                    Token::Identifier("a".to_string()),
+                    Token::Operator(SUB),
+                    Token::Identifier("b".to_string()),
+                    Token::Delimiter('}'),
+                    Token::EOF,
+                ],
+            ),
+            (
+                "let z = (fn(x, y) { x % y })(10, 3);",
+                vec![
+                    Token::Keyword(LET),
+                    Token::Identifier("z".to_string()),
+                    Token::Operator(BIND),
+                    Token::Delimiter('('),
+                    Token::Keyword(FN),
+                    Token::Delimiter('('),
+                    Token::Identifier("x".to_string()),
+                    Token::Delimiter(','),
+                    Token::Identifier("y".to_string()),
+                    Token::Delimiter(')'),
+                    Token::Delimiter('{'),
+                    Token::Identifier("x".to_string()),
+                    Token::Operator(MOD),
+                    Token::Identifier("y".to_string()),
+                    Token::Delimiter('}'),
+                    Token::Delimiter(')'),
+                    Token::Delimiter('('),
+                    Token::Literal("10".to_string()),
+                    Token::Delimiter(','),
+                    Token::Literal("3".to_string()),
+                    Token::Delimiter(')'),
+                    Token::Delimiter(';'),
+                    Token::EOF,
+                ],
+            ),
+            (
+                "fn(x){x*2}",
+                vec![
+                    Token::Keyword("fn"),
+                    Token::Delimiter('('),
+                    Token::Identifier("x".to_string()),
+                    Token::Delimiter(')'),
+                    Token::Delimiter('{'),
+                    Token::Identifier("x".to_string()),
+                    Token::Operator("*"),
+                    Token::Literal("2".to_string()),
+                    Token::Delimiter('}'),
+                    Token::EOF,
+                ],
+            ),
+            (
+                "42;",
+                vec![
+                    Token::Literal("42".to_string()),
+                    Token::Delimiter(';'),
+                    Token::EOF,
+                ],
+            ),
         ];
 
         for (code, expected) in tests {
