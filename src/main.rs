@@ -25,7 +25,7 @@ fn main() {
         }
 
         let tokens = {
-            let mut buf = Buffer::new(&line);
+            let mut buf = Buffer::from_string(&line);
             tokenize(&mut buf)
                 .unwrap_or_default()
                 .into_iter()

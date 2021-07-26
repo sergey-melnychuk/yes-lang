@@ -1,67 +1,6 @@
 use crate::error::TokenError;
-use crate::token::Token;
 use crate::buffer::Iterable;
-
-pub(crate) const LET: &'static str = "let";
-pub(crate) const IF: &'static str = "if";
-pub(crate) const ELSE: &'static str = "else";
-pub(crate) const RETURN: &'static str = "return";
-pub(crate) const FN: &'static str = "fn";
-pub(crate) const TRUE: &'static str = "true";
-pub(crate) const FALSE: &'static str = "false";
-
-pub(crate) const ADD: &'static str = "+";
-pub(crate) const SUB: &'static str = "-";
-pub(crate) const MUL: &'static str = "*";
-pub(crate) const DIV: &'static str = "/";
-pub(crate) const MOD: &'static str = "%";
-pub(crate) const EQ: &'static str = "==";
-pub(crate) const NE: &'static str = "!=";
-pub(crate) const NOT: &'static str = "!";
-pub(crate) const LTE: &'static str = "<=";
-pub(crate) const LT: &'static str = "<";
-pub(crate) const GTE: &'static str = ">=";
-pub(crate) const GT: &'static str = ">";
-pub(crate) const BIND: &'static str = "=";
-
-fn is_keyword(token: &str) -> bool {
-    token == LET
-        || token == IF
-        || token == ELSE
-        || token == RETURN
-        || token == FN
-        || token == TRUE
-        || token == FALSE
-}
-
-fn is_delimiter(c: char) -> bool {
-    c == ';' || c == ',' || c == '{' || c == '}' || c == '(' || c == ')'
-}
-
-fn is_operator(c: char) -> bool {
-    c == '+'
-        || c == '-'
-        || c == '*'
-        || c == '/'
-        || c == '%'
-        || c == '='
-        || c == '!'
-        || c == '>'
-        || c == '<'
-}
-
-fn is_quoted(token: &str) -> bool {
-    token.starts_with('\"') && token.ends_with('\"')
-}
-
-fn is_identifier(token: &str) -> bool {
-    let mut chars = token.chars();
-    let first_char_is_alphabetic_or_underscore = chars
-        .next()
-        .map(|c| c.is_ascii_alphabetic() || c == '_')
-        .unwrap_or_default();
-    first_char_is_alphabetic_or_underscore && chars.all(|c| c.is_ascii_alphanumeric())
-}
+use crate::token::*;
 
 fn match_operator(next: char, peek: Option<char>) -> Result<Token, TokenError> {
     match (next, peek) {
@@ -251,7 +190,7 @@ mod tests {
         ];
 
         for (code, expected) in tests {
-            let mut buf = Buffer::new(code);
+            let mut buf = Buffer::from_string(code);
             let tokens = tokenize(&mut buf).unwrap();
             assert_eq!(tokens, expected);
         }

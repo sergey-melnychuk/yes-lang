@@ -1,26 +1,36 @@
+use std::cell::RefCell;
+
 pub(crate) trait Iterable<T: 'static> {
-    fn next(&mut self) -> Option<&T>;
+    fn next(&self) -> Option<&T>;
     fn peek(&self) -> Option<&T>;
 }
 
-pub(crate) struct Buffer<T: 'static>(Vec<T>, usize);
+pub(crate) struct Buffer<T: 'static>(Vec<T>, RefCell<usize>);
 
 impl Buffer<char> {
-    pub(crate) fn new(s: &str) -> Self {
-        Self(s.chars().collect(), 0)
+    pub(crate) fn from_string(s: &str) -> Self {
+        Self(s.chars().collect(), RefCell::new(0))
     }
 }
 
+impl<T: 'static> Buffer<T> {
+    pub(crate) fn new(vec: Vec<T>) -> Self {
+        Self(vec, RefCell::new(0))
+    }
+}
+
+
 impl<T: 'static> Iterable<T> for Buffer<T> {
-    fn next(&mut self) -> Option<&T> {
-        let idx = self.1;
+    fn next(&self) -> Option<&T> {
+        let mut r = self.1.borrow_mut();
+        let idx = *r;
         if idx < self.0.len() {
-            self.1 += 1;
+            *r += 1;
         }
         self.0.iter().skip(idx).next()
     }
 
     fn peek(&self) -> Option<&T> {
-        self.0.iter().skip(self.1).next()
+        self.0.iter().skip(*self.1.borrow()).next()
     }
 }
