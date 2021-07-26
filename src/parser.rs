@@ -1,9 +1,3 @@
-enum Expression {
-    Const(String),
-    Prefix(Operator, Box<Expression>),
-    Infix(Box<Expression>, Operator, Box<Expression>),
-}
-
 #[derive(Debug)]
 enum Operator {
     Add,
@@ -24,8 +18,12 @@ enum Operator {
 impl Operator {
     fn rank(&self) -> usize {
         match self {
-            Operator::Mul | Operator::Div | Operator::Mod | Operator::Not => 4,
-            Operator::Add | Operator::Sub => 3,
+            Operator::Not => 5,
+            Operator::Mul
+            | Operator::Div
+            | Operator::Mod => 4,
+            Operator::Add
+            | Operator::Sub => 3,
             Operator::Eq
             | Operator::Ne
             | Operator::Lt
@@ -35,4 +33,11 @@ impl Operator {
             Operator::Bind => 1,
         }
     }
+}
+
+#[derive(Debug)]
+enum Expression {
+    Const(String),
+    Prefix(Operator, Box<Expression>),
+    Infix(Box<Expression>, Operator, Box<Expression>),
 }

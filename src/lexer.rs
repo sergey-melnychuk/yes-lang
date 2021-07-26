@@ -1,5 +1,6 @@
 use crate::error::TokenError;
 use crate::token::Token;
+use crate::buffer::Iterable;
 
 pub(crate) const LET: &'static str = "let";
 pub(crate) const IF: &'static str = "if";
@@ -96,17 +97,12 @@ fn match_id_or_literal(this: &mut String, tokens: &mut Vec<Token>) {
     }
 }
 
-pub(crate) trait Iter<T> {
-    fn next(&mut self) -> Option<T>;
-    fn peek(&self) -> Option<T>;
-}
-
-pub(crate) fn tokenize<I: Iter<char>>(buf: &mut I) -> Result<Vec<Token>, TokenError> {
+pub(crate) fn tokenize<I: Iterable<char>>(buf: &mut I) -> Result<Vec<Token>, TokenError> {
     let mut tokens = Vec::new();
 
     let mut this = String::with_capacity(16);
     loop {
-        let next = {
+        let next = *{
             if let Some(chr) = buf.next() {
                 chr
             } else {
@@ -138,7 +134,7 @@ pub(crate) fn tokenize<I: Iter<char>>(buf: &mut I) -> Result<Vec<Token>, TokenEr
         }
 
         if is_operator(next) {
-            let token = match_operator(next, buf.peek())?;
+            let token = match_operator(next, buf.peek().cloned())?;
             if token.len() > 1 {
                 let _ = buf.next();
             }
@@ -154,31 +150,10 @@ pub(crate) fn tokenize<I: Iter<char>>(buf: &mut I) -> Result<Vec<Token>, TokenEr
     Ok(tokens)
 }
 
-pub(crate) struct Buf(String, usize);
-
-impl Buf {
-    pub(crate) fn new(s: &str) -> Self {
-        Self(s.to_string(), 0)
-    }
-}
-
-impl Iter<char> for Buf {
-    fn next(&mut self) -> Option<char> {
-        let c = self.0.chars().skip(self.1).next();
-        if self.1 < self.0.len() {
-            self.1 += 1;
-        }
-        c
-    }
-
-    fn peek(&self) -> Option<char> {
-        self.0.chars().skip(self.1).next()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::Buffer;
 
     #[test]
     fn test_tokenizer() {
@@ -242,7 +217,7 @@ mod tests {
             (
                 "fn(x){x*2}",
                 vec![
-                    Token::Keyword("fn"),
+                    Token::Keyword(FN),
                     Token::Delimiter('('),
                     Token::Identifier("x".to_string()),
                     Token::Delimiter(')'),
@@ -262,10 +237,21 @@ mod tests {
                     Token::EOF,
                 ],
             ),
+            (
+                "let answer = \"42\";",
+                vec![
+                    Token::Keyword(LET),
+                    Token::Identifier("answer".to_string()),
+                    Token::Operator(BIND),
+                    Token::Literal("\"42\"".to_string()),
+                    Token::Delimiter(';'),
+                    Token::EOF,
+                ]
+            ),
         ];
 
         for (code, expected) in tests {
-            let mut buf = Buf::new(code);
+            let mut buf = Buffer::new(code);
             let tokens = tokenize(&mut buf).unwrap();
             assert_eq!(tokens, expected);
         }

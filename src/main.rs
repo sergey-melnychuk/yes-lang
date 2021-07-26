@@ -1,13 +1,17 @@
-use crate::lexer::{tokenize, Buf};
-use std::io;
-use std::io::{BufRead, Write};
-
 pub(crate) mod error;
 pub(crate) mod lexer;
 pub(crate) mod parser;
 pub(crate) mod token;
+pub(crate) mod buffer;
+
+use std::io;
+use std::io::{BufRead, Write};
+
+use crate::lexer::tokenize;
+use crate::buffer::Buffer;
 
 fn main() {
+    println!("REPL: enter :q to quit.");
     let stdin = io::stdin();
     loop {
         print!("> ");
@@ -21,7 +25,7 @@ fn main() {
         }
 
         let tokens = {
-            let mut buf = Buf::new(&line);
+            let mut buf = Buffer::new(&line);
             tokenize(&mut buf)
                 .unwrap_or_default()
                 .into_iter()
