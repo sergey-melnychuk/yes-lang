@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use crate::token::Token;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum TokenError {
     EOF,
@@ -11,8 +12,10 @@ pub(crate) enum TokenError {
 impl Display for TokenError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            TokenError::EOF => write!(f, "Unexpected EOF"),
-            TokenError::Unexpected(c) => write!(f, "Unexpected: '{}'", c),
+            TokenError::EOF =>
+                write!(f, "Unexpected EOF"),
+            TokenError::Unexpected(c) =>
+                write!(f, "Unexpected: '{}'", c)
         }
     }
 }
@@ -22,14 +25,22 @@ impl Error for TokenError {}
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ParserError {
     EOF,
-    Unexpected(String, Token),
+    Token(Token, Token),
+    Prefix(Token),
+    Infix(Token),
 }
 
 impl Display for ParserError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            ParserError::EOF => write!(f, "Unexpected EOF"),
-            ParserError::Unexpected(expected, got) => write!(f, "Expected '{}' but got '{:?}'", expected, got)
+            ParserError::EOF =>
+                write!(f, "Unexpected EOF"),
+            ParserError::Token(expected, got) =>
+                write!(f, "Expected '{:?}' but got '{:?}'", expected, got),
+            ParserError::Prefix(token) =>
+                write!(f, "No prefix version of '{:?}' exists", token),
+            ParserError::Infix(token) =>
+                write!(f, "No infix version of '{:?}' exists", token)
         }
     }
 }

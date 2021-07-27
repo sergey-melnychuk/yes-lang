@@ -4,17 +4,19 @@ use crate::token::*;
 
 fn match_operator(next: char, peek: Option<char>) -> Result<Token, TokenError> {
     match (next, peek) {
-        ('+', _) => Ok(Token::Operator(ADD)),
-        ('-', _) => Ok(Token::Operator(SUB)),
-        ('*', _) => Ok(Token::Operator(MUL)),
-        ('/', _) => Ok(Token::Operator(DIV)),
-        ('%', _) => Ok(Token::Operator(MOD)),
+        ('+', _) => Ok(Token::Operator(PLUS)),
+        ('-', _) => Ok(Token::Operator(DASH)),
+        ('*', _) => Ok(Token::Operator(STAR)),
+        ('/', _) => Ok(Token::Operator(SLASH)),
+        ('%', _) => Ok(Token::Operator(PERCENT)),
         ('>', Some('=')) => Ok(Token::Operator(GTE)),
         ('>', _) => Ok(Token::Operator(GT)),
         ('<', Some('=')) => Ok(Token::Operator(LTE)),
         ('<', _) => Ok(Token::Operator(LT)),
         ('!', Some('=')) => Ok(Token::Operator(NE)),
-        ('!', _) => Ok(Token::Operator(NOT)),
+        ('!', _) => Ok(Token::Operator(BANG)),
+        ('&', Some('&')) => Ok(Token::Operator(AND)),
+        ('|', Some('|')) => Ok(Token::Operator(OR)),
         ('=', Some('=')) => Ok(Token::Operator(EQ)),
         ('=', _) => Ok(Token::Operator(BIND)),
         _ => Err(TokenError::Unexpected(format!("{}", next))),
@@ -36,7 +38,7 @@ fn match_id_or_literal(this: &mut String, tokens: &mut Vec<Token>) {
     }
 }
 
-pub(crate) fn tokenize<I: Iterable<char>>(buf: &mut I) -> Result<Vec<Token>, TokenError> {
+pub(crate) fn tokenize<I: Iterable<char>>(buf: &I) -> Result<Vec<Token>, TokenError> {
     let mut tokens = Vec::new();
 
     let mut this = String::with_capacity(16);
@@ -119,7 +121,7 @@ mod tests {
                     Token::Delimiter(')'),
                     Token::Delimiter('{'),
                     Token::Identifier("a".to_string()),
-                    Token::Operator(SUB),
+                    Token::Operator(DASH),
                     Token::Identifier("b".to_string()),
                     Token::Delimiter('}'),
                     Token::EOF,
@@ -140,7 +142,7 @@ mod tests {
                     Token::Delimiter(')'),
                     Token::Delimiter('{'),
                     Token::Identifier("x".to_string()),
-                    Token::Operator(MOD),
+                    Token::Operator(PERCENT),
                     Token::Identifier("y".to_string()),
                     Token::Delimiter('}'),
                     Token::Delimiter(')'),
@@ -184,6 +186,15 @@ mod tests {
                     Token::Operator(BIND),
                     Token::Literal("\"42\"".to_string()),
                     Token::Delimiter(';'),
+                    Token::EOF,
+                ]
+            ),
+            (
+                "a <= 2",
+                vec![
+                    Token::Identifier("a".to_string()),
+                    Token::Operator(LTE),
+                    Token::Literal("2".to_string()),
                     Token::EOF,
                 ]
             ),

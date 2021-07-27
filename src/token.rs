@@ -29,14 +29,16 @@ pub(crate) const FN: &'static str = "fn";
 pub(crate) const TRUE: &'static str = "true";
 pub(crate) const FALSE: &'static str = "false";
 
-pub(crate) const ADD: &'static str = "+";
-pub(crate) const SUB: &'static str = "-";
-pub(crate) const MUL: &'static str = "*";
-pub(crate) const DIV: &'static str = "/";
-pub(crate) const MOD: &'static str = "%";
+pub(crate) const PLUS: &'static str = "+";
+pub(crate) const DASH: &'static str = "-";
+pub(crate) const STAR: &'static str = "*";
+pub(crate) const SLASH: &'static str = "/";
+pub(crate) const PERCENT: &'static str = "%";
 pub(crate) const EQ: &'static str = "==";
 pub(crate) const NE: &'static str = "!=";
-pub(crate) const NOT: &'static str = "!";
+pub(crate) const OR: &'static str = "||";
+pub(crate) const AND: &'static str = "&&";
+pub(crate) const BANG: &'static str = "!";
 pub(crate) const LTE: &'static str = "<=";
 pub(crate) const LT: &'static str = "<";
 pub(crate) const GTE: &'static str = ">=";
@@ -67,6 +69,8 @@ pub(crate) fn is_operator(c: char) -> bool {
         || c == '!'
         || c == '>'
         || c == '<'
+        || c == '&'
+        || c == '|'
 }
 
 pub(crate) fn is_identifier(token: &str) -> bool {

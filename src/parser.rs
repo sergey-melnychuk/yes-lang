@@ -2,7 +2,8 @@ use crate::buffer::{Buffer, Iterable};
 use crate::error::ParserError;
 use crate::token::*;
 
-#[derive(Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub(crate) enum Operator {
     Add,
     Sub,
@@ -15,45 +16,36 @@ pub(crate) enum Operator {
     Lte,
     Gt,
     Gte,
+    Neg,
     Not,
+    Or,
+    And,
     Bind,
+    Call(String),
 }
 
 impl Operator {
+    pub(crate) const MIN_RANK: usize = 0;
+
     pub(crate) fn rank(&self) -> usize {
         match self {
-            Operator::Not => 5,
+            Operator::Call(_) => 8,
+            Operator::Not
+            | Operator::Neg => 7,
             Operator::Mul
             | Operator::Div
-            | Operator::Mod => 4,
+            | Operator::Mod => 6,
             Operator::Add
-            | Operator::Sub => 3,
-            Operator::Eq
-            | Operator::Ne
-            | Operator::Lt
+            | Operator::Sub => 5,
+            Operator::Lt
             | Operator::Lte
             | Operator::Gt
-            | Operator::Gte => 2,
+            | Operator::Gte => 4,
+            Operator::Eq
+            | Operator::Ne => 3,
+            Operator::Or
+            | Operator::And => 2,
             Operator::Bind => 1,
-        }
-    }
-
-    pub(crate) fn from_token(token: &Token) -> Result<Operator, ParserError> {
-        match token {
-            Token::Operator(ADD) => Ok(Operator::Add),
-            Token::Operator(SUB) => Ok(Operator::Sub),
-            Token::Operator(MUL) => Ok(Operator::Mul),
-            Token::Operator(DIV) => Ok(Operator::Div),
-            Token::Operator(MOD) => Ok(Operator::Mod),
-            Token::Operator(GTE) => Ok(Operator::Gte),
-            Token::Operator(GT) => Ok(Operator::Gt),
-            Token::Operator(LTE) => Ok(Operator::Lte),
-            Token::Operator(LT) => Ok(Operator::Lt),
-            Token::Operator(NE) => Ok(Operator::Ne),
-            Token::Operator(EQ) => Ok(Operator::Eq),
-            Token::Operator(NOT) => Ok(Operator::Not),
-            Token::Operator(BIND) => Ok(Operator::Bind),
-            _ => Err(ParserError::Unexpected("operator".to_string(), token.clone()))
         }
     }
 }
@@ -62,33 +54,65 @@ impl Operator {
 pub(crate) enum Statement {
     Let(String, Expression),
     Ret(Expression),
+    If(Expression, Expression, Expression),
+    Fn(String, Vec<String>, Vec<Statement>),
+    Call(Box<Expression>, Vec<Expression>),
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum Expression {
-    Const(String),
+    Unit,
+    Var(String),
+    Lit(String),
+    If(Box<Expression>, Box<Expression>, Box<Expression>),
+    Fn(Vec<String>, Vec<Statement>),
+    Apply(Box<Expression>, Vec<Expression>),
     Prefix(Operator, Box<Expression>),
     Infix(Box<Expression>, Operator, Box<Expression>),
 }
 
-pub(crate) fn parse(tokens: Vec<Token>) -> Result<Vec<Statement>, ParserError> {
-    let mut buffer = Buffer::new(tokens);
+pub(crate) fn parse(buffer: &Buffer<Token>) -> Result<Vec<Statement>, ParserError> {
     let mut result = Vec::new();
 
     loop {
-        let next = if let Some(next) = buffer.next() {
+        let token = if let Some(next) = buffer.peek() {
             if next == &Token::EOF {
                 return Ok(result);
             } else {
+                let _ = buffer.next();
                 next
             }
         } else {
             return Err(ParserError::EOF);
         };
 
-        if next == &Token::Keyword(LET) {
-            let stmt = parse_let_statement(&mut buffer)?;
+        if token == &Token::Keyword(LET) {
+            let stmt = parse_let_statement(&buffer)?;
             result.push(stmt);
+        } else if token == &Token::Keyword(RETURN) {
+            let expr = parse_expression(&buffer, Operator::MIN_RANK)?;
+            expect(buffer, &Token::Delimiter(';'))?;
+            let stmt = Statement::Ret(expr);
+            result.push(stmt);
+        } else if token == &Token::Keyword(IF) {
+            if let Expression::If(cond, if_clause, else_clause) = parse_if_expression(&buffer)? {
+                let stmt = Statement::If(*cond, *if_clause, *else_clause);
+                result.push(stmt);
+            }
+        } else if token == &Token::Keyword(FN) {
+            let stmt = parse_fn_definition(&buffer)?;
+            result.push(stmt);
+        } else if token == &Token::Delimiter('(') {
+            let expr = parse_expression(buffer, Operator::MIN_RANK)?;
+            expect(buffer, &Token::Delimiter(')'))?;
+            let apply = parse_fn_application(expr, buffer)?;
+            if let Expression::Apply(body, args) = apply {
+                let stmt = Statement::Call(body, args);
+                result.push(stmt);
+            }
+        } else {
+            buffer.back();
+            return Ok(result);
         }
     }
 }
@@ -109,63 +133,258 @@ fn peek(buffer: &Buffer<Token>) -> Result<&Token, ParserError> {
     }
 }
 
-fn is_literal(token: &Token) -> bool {
+fn expect(buffer: &Buffer<Token>, expected: &Token) -> Result<(), ParserError> {
+    if let Some(token) = buffer.next() {
+        if token != expected {
+            Err(ParserError::Token(expected.clone(), token.clone()))
+        } else {
+            Ok(())
+        }
+    } else {
+        Err(ParserError::EOF)
+    }
+}
+
+trait PrefixParser {
+    fn parse(&mut self, token: &Token, buffer: &Buffer<Token>) -> Result<Expression, ParserError>;
+}
+
+impl PrefixParser for Operator {
+    fn parse(&mut self, token: &Token, buffer: &Buffer<Token>) -> Result<Expression, ParserError> {
+        match self {
+            Operator::Not | Operator::Neg => {
+                let rhs = parse_expression(buffer, self.rank())?;
+                Ok(Expression::Prefix(self.clone(), Box::new(rhs)))
+            },
+            _ => Err(ParserError::Prefix(token.clone()))
+        }
+    }
+}
+
+fn get_prefix_parser(token: &Token) -> Option<impl PrefixParser> {
     match token {
-        Token::Literal(_) => true,
-        _ => false
+        Token::Operator(DASH) => Some(Operator::Neg),
+        Token::Operator(BANG) => Some(Operator::Not),
+        _ => None
     }
 }
 
-fn is_operator(token: &Token) -> bool {
+trait InfixParser {
+    fn rank(&self) -> usize;
+    fn parse(&mut self, lhs: Expression, token: &Token, buffer: &Buffer<Token>) -> Result<Expression, ParserError>;
+}
+
+impl InfixParser for Operator {
+    fn rank(&self) -> usize {
+        self.rank()
+    }
+
+    fn parse(&mut self, lhs: Expression, token: &Token, buffer: &Buffer<Token>) -> Result<Expression, ParserError> {
+        match self {
+            Operator::Add
+            | Operator::Sub
+            | Operator::Mul
+            | Operator::Mod
+            | Operator::Div
+            | Operator::And
+            | Operator::Or
+            | Operator::Lt
+            | Operator::Lte
+            | Operator::Gt
+            | Operator::Gte
+            | Operator::Eq
+            | Operator::Ne => {
+                let rhs = parse_expression(buffer, self.rank())?;
+                Ok(Expression::Infix(Box::new(lhs), self.clone(), Box::new(rhs)))
+            },
+            _ => Err(ParserError::Infix(token.clone()))
+        }
+    }
+}
+
+fn get_infix_parser(token: &Token) -> Option<impl InfixParser> {
     match token {
-        Token::Operator(_) => true,
-        _ => false
+        Token::Operator(PLUS) => Some(Operator::Add),
+        Token::Operator(DASH) => Some(Operator::Sub),
+        Token::Operator(STAR) => Some(Operator::Mul),
+        Token::Operator(SLASH) => Some(Operator::Div),
+        Token::Operator(PERCENT) => Some(Operator::Mod),
+        Token::Operator(LT) => Some(Operator::Lt),
+        Token::Operator(LTE) => Some(Operator::Lte),
+        Token::Operator(GT) => Some(Operator::Gt),
+        Token::Operator(GTE) => Some(Operator::Gte),
+        Token::Operator(EQ) => Some(Operator::Eq),
+        Token::Operator(NE) => Some(Operator::Ne),
+        Token::Operator(AND) => Some(Operator::And),
+        Token::Operator(OR) => Some(Operator::Or),
+        _ => None
     }
 }
 
-fn is_delimiter(token: &Token, chr: char) -> bool {
-    match token {
-        Token::Delimiter(d) => *d == chr,
-        _ => false
-    }
-}
+fn parse_expression(buffer: &Buffer<Token>, rank: usize) -> Result<Expression, ParserError> {
+    let token = next(buffer)?;
+    let mut expr = if let Token::Operator(_) = token {
+        if let Some(mut op) = get_prefix_parser(token) {
+            op.parse(token, buffer)?
+        } else {
+            return Err(ParserError::Prefix(token.clone()));
+        }
+    } else if let Token::Literal(lit) = token {
+        Expression::Lit(lit.to_owned())
+    } else if let Token::Identifier(id) = token {
+        if let Token::Delimiter('(') = peek(buffer)? {
+            let name = Expression::Var(id.to_owned());
+            parse_fn_application(name, buffer)?
+        } else {
+            Expression::Var(id.to_owned())
+        }
+    } else if let Token::Keyword(FN) = token {
+        parse_fn_expression(buffer)?
+    } else if let Token::Keyword(IF) = token {
+        parse_if_expression(buffer)?
+    } else if let Token::Delimiter('(') = token {
+        let is_fn = peek(buffer)? == &Token::Keyword(FN);
+        let expr = parse_expression(buffer, Operator::MIN_RANK)?;
+        expect(buffer, &Token::Delimiter(')'))?;
+        if is_fn {
+            parse_fn_application(expr, buffer)?
+        } else {
+            expr
+        }
+    } else {
+        return Err(ParserError::Token(Token::Keyword("*"), token.clone()));
+    };
 
-
-fn parse_operator(op: Operator) -> Result<Expression, ParserError> {
-    todo!()
-}
-
-fn parse_expression(buffer: &mut Buffer<Token>) -> Result<Expression, ParserError> {
-    let lhs = next(buffer)?;
-    if lhs == &Token::EOF {
-        return Err(ParserError::Unexpected("Expression".to_string(), Token::EOF));
-    }
-
-    if let Token::Literal(lit) = lhs {
-        let peek = peek(buffer)?;
-        if let Token::Delimiter(';') = peek {
-            return Ok(Expression::Const(lit.to_owned()));
+    while let Token::Operator(_) = peek(buffer)? {
+        let token = peek(buffer)?;
+        if let Some(mut op) = get_infix_parser(token) {
+            if rank < op.rank() {
+                let _ = next(buffer)?;
+                expr = op.parse(expr, token, buffer)?;
+            } else {
+                break;
+            }
         }
     }
 
-    Ok(Expression::Const("not yet implemented".to_string()))
+    Ok(expr)
 }
 
-fn parse_let_statement(buffer: &mut Buffer<Token>) -> Result<Statement, ParserError> {
+fn parse_let_statement(buffer: &Buffer<Token>) -> Result<Statement, ParserError> {
     let token = next(buffer)?;
     let id = if let Token::Identifier(id) = token {
         id.to_owned()
     } else {
-        return Err(ParserError::Unexpected("Identifier".to_string(), token.clone()));
+        return Err(ParserError::Token(Token::Identifier("*".to_string()), token.clone()));
     };
 
     let eq = next(buffer)?;
     if eq != &Token::Operator(BIND) {
-        return Err(ParserError::Unexpected("=".to_string(), token.clone()));
+        return Err(ParserError::Token(Token::Operator(BIND), token.clone()));
     }
 
-    let expr = parse_expression(buffer)?;
+    let expr = parse_expression(buffer, Operator::MIN_RANK)?;
+    expect(buffer, &Token::Delimiter(';'))?;
     Ok(Statement::Let(id, expr))
+}
+
+fn parse_if_expression(buffer: &Buffer<Token>) -> Result<Expression, ParserError> {
+    let cond = parse_expression(&buffer, Operator::MIN_RANK)?;
+    expect(buffer, &Token::Delimiter('{'))?;
+    let if_clause = parse_expression(&buffer, Operator::MIN_RANK)?;
+    expect(buffer, &Token::Delimiter('}'))?;
+    let else_clause = if peek(buffer)? == &Token::Keyword(ELSE) {
+        let _ = next(buffer)?;
+        expect(buffer, &Token::Delimiter('{'))?;
+        let expr = parse_expression(&buffer, Operator::MIN_RANK)?;
+        expect(buffer, &Token::Delimiter('}'))?;
+        expr
+    } else {
+        Expression::Unit
+    };
+    Ok(Expression::If(Box::new(cond), Box::new(if_clause), Box::new(else_clause)))
+}
+
+fn parse_fn_definition(buffer: &Buffer<Token>) -> Result<Statement, ParserError> {
+    let token = next(buffer)?;
+    let name = if let Token::Identifier(id) = token {
+        id.to_owned()
+    } else {
+        return Err(ParserError::Token(Token::Identifier("*".to_string()), token.clone()));
+    };
+
+    let mut args = Vec::new();
+    expect(buffer, &Token::Delimiter('('))?;
+    loop {
+        let token = peek(buffer)?;
+        if let Token::Identifier(arg) = token {
+            args.push(arg.to_owned());
+            let _ = next(buffer)?;
+        }
+        let token = next(buffer)?;
+        if token == &Token::Delimiter(')') {
+            break;
+        }
+        if token == &Token::Delimiter(',') {
+            continue;
+        }
+        return Err(ParserError::Token(Token::Delimiter(')'), token.clone()));
+    }
+
+    expect(buffer, &Token::Delimiter('{'))?;
+    let statements = parse(buffer)?;
+    expect(buffer, &Token::Delimiter('}'))?;
+
+    Ok(Statement::Fn(name, args, statements))
+}
+
+fn parse_fn_expression(buffer: &Buffer<Token>) -> Result<Expression, ParserError> {
+    let mut args = Vec::new();
+    expect(buffer, &Token::Delimiter('('))?;
+    loop {
+        let token = peek(buffer)?;
+        if let Token::Identifier(arg) = token {
+            args.push(arg.to_owned());
+            let _ = next(buffer)?;
+        }
+        let token = next(buffer)?;
+        if token == &Token::Delimiter(')') {
+            break;
+        }
+        if token == &Token::Delimiter(',') {
+            continue;
+        }
+        return Err(ParserError::Token(Token::Delimiter(')'), token.clone()));
+    }
+
+    expect(buffer, &Token::Delimiter('{'))?;
+    let statements = parse(buffer)?;
+    expect(buffer, &Token::Delimiter('}'))?;
+
+    Ok(Expression::Fn(args, statements))
+}
+
+fn parse_fn_application(func: Expression, buffer: &Buffer<Token>) -> Result<Expression, ParserError> {
+    expect(buffer, &Token::Delimiter('('))?;
+    let mut args = Vec::new();
+    loop {
+        let token = peek(buffer)?;
+        if token == &Token::Delimiter(')') {
+            break;
+        }
+        let arg = parse_expression(buffer, Operator::MIN_RANK)?;
+        args.push(arg);
+        let token = peek(buffer)?;
+        if token == &Token::Delimiter(',') {
+            let _ = next(buffer)?;
+            continue;
+        }
+        if token == &Token::Delimiter(')') {
+            break;
+        }
+    }
+    expect(buffer, &Token::Delimiter(')'))?;
+    Ok(Expression::Apply(Box::new(func), args))
 }
 
 #[cfg(test)]
@@ -178,58 +397,399 @@ mod tests {
         let tests = vec![
             (
                 "let ;",
-                Err(ParserError::Unexpected("Identifier".to_string(), Token::Delimiter(';')))
+                Err(ParserError::Token(Token::Identifier("*".to_string()), Token::Delimiter(';')))
             ),
             (
                 "let 123",
-                Err(ParserError::Unexpected("Identifier".to_string(), Token::Literal("123".to_string())))
+                Err(ParserError::Token(Token::Identifier("*".to_string()), Token::Literal("123".to_string())))
             ),
             (
                 "let abc;",
-                Err(ParserError::Unexpected("=".to_string(), Token::Identifier("abc".to_string())))
+                Err(ParserError::Token(Token::Operator(BIND), Token::Identifier("abc".to_string())))
             ),
             (
                 "let x =",
-                Err(ParserError::Unexpected("Expression".to_string(), Token::EOF))
+                Err(ParserError::Token(Token::Keyword("*"), Token::EOF))
             ),
             (
                 "let answer = 42;",
                 Ok(vec![
-                    Statement::Let("answer".to_string(), Expression::Const("42".to_string()))
+                    Statement::Let("answer".to_string(), Expression::Lit("42".to_string()))
+                ])
+            ),
+            (
+                "let result = x + 1;",
+                Ok(vec![
+                    Statement::Let("result".to_string(),
+                        Expression::Infix(
+                            Box::new(Expression::Var("x".to_string())),
+                            Operator::Add,
+                            Box::new(Expression::Lit("1".to_string()))
+                        ))
+                ])
+            ),
+            (
+                "let flag = x >= 42;",
+                Ok(vec![
+                    Statement::Let("flag".to_string(),
+                                   Expression::Infix(
+                                       Box::new(Expression::Var("x".to_string())),
+                                       Operator::Gte,
+                                       Box::new(Expression::Lit("42".to_string()))
+                                   ))
+                ])
+            ),
+            (
+                "return (a + 16) * k + 4;",
+                Ok(vec![
+                    Statement::Ret(Expression::Infix(
+                        Box::new(Expression::Infix(
+                            Box::new(Expression::Infix(
+                                Box::new(Expression::Var("a".to_string())),
+                                Operator::Add,
+                                Box::new(Expression::Lit("16".to_string())),
+                            )),
+                            Operator::Mul,
+                            Box::new(Expression::Var("k".to_string())),
+                        )),
+                        Operator::Add,
+                        Box::new(Expression::Lit("4".to_string())),
+                    ))
+                ])
+            ),
+            (
+                "fn add(a, b) { return a + b; }",
+                Ok(vec![
+                    Statement::Fn(
+                        "add".to_string(),
+                        vec![
+                            "a".to_string(),
+                            "b".to_string(),
+                        ],
+                    vec![
+                            Statement::Ret(Expression::Infix(
+                                Box::new(Expression::Var("a".to_string())),
+                                Operator::Add,
+                                Box::new(Expression::Var("b".to_string())),
+                            ))
+                        ])
+                ])
+            ),
+            (
+                "let x = fn(a) { return a; };",
+                Ok(vec![
+                    Statement::Let("x".to_string(),
+                    Expression::Fn(
+                        vec!["a".to_string()],
+                    vec![Statement::Ret(Expression::Var("a".to_string()))]))
+                ])
+            ),
+            (
+                "return f(x);",
+                Ok(vec![
+                    Statement::Ret(Expression::Apply(
+                        Box::new(Expression::Var("f".to_string())),
+                        vec![
+                            Expression::Var("x".to_string())
+                        ]
+                    ))
+                ])
+            ),
+            (
+                "fn sum(a, b) { return a + b; }",
+                Ok(vec![
+                    Statement::Fn("sum".to_string(),
+                                  vec!["a".to_string(), "b".to_string()],
+                                  vec![Statement::Ret(
+                                      Expression::Infix(
+                                          Box::new(Expression::Var("a".to_string())),
+                                          Operator::Add,
+                                          Box::new(Expression::Var("b".to_string()))))])
+                ])
+            ),
+            (
+                "let f = fn(a, b) { return (a + b) / 2; };",
+                Ok(vec![
+                    Statement::Let("f".to_string(),
+                                   Expression::Fn(
+                                       vec!["a".to_string(), "b".to_string()],
+                                       vec![
+                                           Statement::Ret(Expression::Infix(
+                                               Box::new(Expression::Infix(
+                                                   Box::new(Expression::Var("a".to_string())),
+                                                   Operator::Add,
+                                                   Box::new(Expression::Var("b".to_string())))),
+                                               Operator::Div,
+                                               Box::new(Expression::Lit("2".to_string()))))]))
+                ])
+            ),
+            (
+                "let x = (fn(a,b) {return a+b;})(1,2);",
+                Ok(vec![
+                    Statement::Let(
+                        "x".to_string(),
+                        Expression::Apply(
+                            Box::new(Expression::Fn(
+                                vec!["a".to_string(), "b".to_string()],
+                                vec![
+                                    Statement::Ret(
+                                        Expression::Infix(
+                                            Box::new(Expression::Var("a".to_string())),
+                                            Operator::Add,
+                                            Box::new(Expression::Var("b".to_string()))))])),
+                            vec![
+                                Expression::Lit("1".to_string()),
+                                Expression::Lit("2".to_string())]))
+                ])
+            ),
+            (
+                "(fn(a,b) {return a+b;})(1,2);",
+                Ok(vec![
+                    Statement::Call(
+                        Box::new(Expression::Fn(
+                            vec!["a".to_string(), "b".to_string()],
+                            vec![
+                                Statement::Ret(
+                                    Expression::Infix(
+                                        Box::new(Expression::Var("a".to_string())),
+                                        Operator::Add,
+                                        Box::new(Expression::Var("b".to_string()))))])),
+                        vec![
+                            Expression::Lit("1".to_string()),
+                            Expression::Lit("2".to_string())])
                 ])
             ),
         ];
 
         for (src, expected) in tests {
             let tokens = tokenize(&mut Buffer::from_string(src)).unwrap();
-            let parsed = parse(tokens);
+            let buf = Buffer::new(tokens);
+            let parsed = parse(&buf);
 
             assert_eq!(parsed, expected);
         }
     }
 
     #[test]
-    #[ignore]
     fn test_parse_expression() {
         let tests = vec![
             (
-                "1 + 2;",
+                "-x",
+                Ok(
+                    Expression::Prefix(
+                        Operator::Neg,
+                        Box::new(Expression::Var("x".to_string())))
+                )
+            ),
+            (
+                "!abc",
+                Ok(
+                    Expression::Prefix(
+                        Operator::Not,
+                        Box::new(Expression::Var("abc".to_string())))
+                )
+            ),
+            (
+                "1 + 2",
                 Ok(
                     Expression::Infix(
-                        Box::new(Expression::Const("1".to_string())),
+                        Box::new(Expression::Lit("1".to_string())),
                         Operator::Add,
-                        Box::new(Expression::Const("2".to_string()))
+                        Box::new(Expression::Lit("2".to_string()))
                     )
                 )
             ),
+            (
+                "z != 42",
+                Ok(
+                    Expression::Infix(
+                        Box::new(Expression::Var("z".to_string())),
+                        Operator::Ne,
+                        Box::new(Expression::Lit("42".to_string()))
+                    )
+                )
+            ),
+            (
+                "a <= 2",
+                Ok(
+                    Expression::Infix(
+                        Box::new(Expression::Var("a".to_string())),
+                        Operator::Lte,
+                        Box::new(Expression::Lit("2".to_string()))
+                    )
+                )
+            ),
+            (
+                "n % 42",
+                Ok(
+                    Expression::Infix(
+                        Box::new(Expression::Var("n".to_string())),
+                        Operator::Mod,
+                        Box::new(Expression::Lit("42".to_string()))
+                    )
+                )
+            ),
+            (
+                "x + 1 / 2",
+                Ok(
+                    Expression::Infix(
+                        Box::new(Expression::Var("x".to_string())),
+                        Operator::Add,
+                        Box::new(Expression::Infix(
+                            Box::new(Expression::Lit("1".to_string())),
+                            Operator::Div,
+                            Box::new(Expression::Lit("2".to_string())))),
+                    )
+                )
+            ),
+            (
+                "a * 2 + 1",
+                Ok(
+                    Expression::Infix(
+                        Box::new(Expression::Infix(
+                            Box::new(Expression::Var("a".to_string())),
+                            Operator::Mul,
+                            Box::new(Expression::Lit("2".to_string())))),
+                        Operator::Add,
+                        Box::new(Expression::Lit("1".to_string())),
+                    )
+                )
+            ),
+            (
+                "(abc + 3) * 4",
+                Ok(
+                    Expression::Infix(
+                        Box::new(Expression::Infix(
+                            Box::new(Expression::Var("abc".to_string())),
+                            Operator::Add,
+                            Box::new(Expression::Lit("3".to_string())))),
+                        Operator::Mul,
+                        Box::new(Expression::Lit("4".to_string())),
+                    )
+                )
+            ),
+            (
+                "(((42)))",
+                Ok(
+                    Expression::Lit("42".to_string())
+                )
+            ),
+            (
+                "2 * (x + 3)",
+                Ok(
+                    Expression::Infix(
+                        Box::new(Expression::Lit("2".to_string())),
+                        Operator::Mul,
+                        Box::new(Expression::Infix(
+                            Box::new(Expression::Var("x".to_string())),
+                            Operator::Add,
+                            Box::new(Expression::Lit("3".to_string())))),
+                    )
+                )
+            ),
+            (
+                "(a + b) * (c - d)",
+                Ok(
+                    Expression::Infix(
+                        Box::new(Expression::Infix(
+                            Box::new(Expression::Var("a".to_string())),
+                            Operator::Add,
+                            Box::new(Expression::Var("b".to_string())))),
+                        Operator::Mul,
+                        Box::new(Expression::Infix(
+                            Box::new(Expression::Var("c".to_string())),
+                            Operator::Sub,
+                            Box::new(Expression::Var("d".to_string())))),
+                    )
+                )
+            ),
+            (
+                "a >= 42 && x != 1",
+                Ok(Expression::Infix(
+                    Box::new(Expression::Infix(
+                        Box::new(Expression::Var("a".to_string())),
+                        Operator::Gte,
+                        Box::new(Expression::Lit("42".to_string())),
+                    )),
+                    Operator::And,
+                    Box::new(Expression::Infix(
+                        Box::new(Expression::Var("x".to_string())),
+                        Operator::Ne,
+                        Box::new(Expression::Lit("1".to_string())),
+                    ))
+                ))
+            ),
+            (
+                "x == 0 || y <= 42",
+                Ok(Expression::Infix(
+                    Box::new(Expression::Infix(
+                        Box::new(Expression::Var("x".to_string())),
+                        Operator::Eq,
+                        Box::new(Expression::Lit("0".to_string())),
+                    )),
+                    Operator::Or,
+                    Box::new(Expression::Infix(
+                        Box::new(Expression::Var("y".to_string())),
+                        Operator::Lte,
+                        Box::new(Expression::Lit("42".to_string())),
+                    ))
+                ))
+            ),
+            (
+                "(fn(a,b) {return a+b;})(1,2)",
+                Ok(Expression::Apply(
+                    Box::new(Expression::Fn(
+                        vec!["a".to_string(), "b".to_string()],
+                        vec![Statement::Ret(
+                            Expression::Infix(
+                                Box::new(Expression::Var("a".to_string())),
+                                Operator::Add,
+                                Box::new(Expression::Var("b".to_string())),
+                            ))]
+                    )),
+                    vec![
+                        Expression::Lit("1".to_string()),
+                        Expression::Lit("2".to_string()),
+                    ]
+                ))
+            ),
+            (
+                "if a == 0 { x + 1 } else { y - 2 }",
+                Ok(Expression::If(
+                    Box::new(Expression::Infix(
+                        Box::new(Expression::Var("a".to_string())),
+                        Operator::Eq,
+                        Box::new(Expression::Lit("0".to_string())),
+                    )),
+                    Box::new(Expression::Infix(
+                        Box::new(Expression::Var("x".to_string())),
+                        Operator::Add,
+                        Box::new(Expression::Lit("1".to_string())))),
+                    Box::new(Expression::Infix(
+                        Box::new(Expression::Var("y".to_string())),
+                        Operator::Sub,
+                        Box::new(Expression::Lit("2".to_string()))))
+                ))
+            ),
+            (
+                "if a { f(x) } else { g(y) }",
+                Ok(Expression::If(
+                    Box::new(Expression::Var("a".to_string())),
+                    Box::new(Expression::Apply(
+                        Box::new(Expression::Var("f".to_string())),
+                                      vec![Expression::Var("x".to_string())])),
+                    Box::new(Expression::Apply(Box::new(Expression::Var("g".to_string())),
+                                      vec![Expression::Var("y".to_string())]))))
+
+            )
         ];
 
         for (src, expected) in tests {
             let tokens = tokenize(&mut Buffer::from_string(src)).unwrap();
             let mut buffer = Buffer::new(tokens);
-            let parsed = parse_expression(&mut buffer);
+            let parsed = parse_expression(&mut buffer, Operator::MIN_RANK);
 
-            assert_eq!(parsed, expected);
+            assert_eq!(parsed, expected, "{}", src);
         }
     }
 }

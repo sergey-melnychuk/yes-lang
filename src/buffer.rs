@@ -3,6 +3,7 @@ use std::cell::RefCell;
 pub(crate) trait Iterable<T: 'static> {
     fn next(&self) -> Option<&T>;
     fn peek(&self) -> Option<&T>;
+    fn back(&self);
 }
 
 pub(crate) struct Buffer<T: 'static>(Vec<T>, RefCell<usize>);
@@ -32,5 +33,12 @@ impl<T: 'static> Iterable<T> for Buffer<T> {
 
     fn peek(&self) -> Option<&T> {
         self.0.iter().skip(*self.1.borrow()).next()
+    }
+
+    fn back(&self) {
+        let mut r = self.1.borrow_mut();
+        if *r > 1 {
+            *r -= 1;
+        }
     }
 }
