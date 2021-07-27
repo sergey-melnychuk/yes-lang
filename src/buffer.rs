@@ -20,7 +20,6 @@ impl<T: 'static> Buffer<T> {
     }
 }
 
-
 impl<T: 'static> Iterable<T> for Buffer<T> {
     fn next(&self) -> Option<&T> {
         let mut r = self.1.borrow_mut();

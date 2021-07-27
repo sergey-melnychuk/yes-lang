@@ -1,5 +1,5 @@
-use crate::error::TokenError;
 use crate::buffer::Iterable;
+use crate::error::TokenError;
 use crate::token::*;
 
 fn match_operator(next: char, peek: Option<char>) -> Result<Token, TokenError> {
@@ -187,7 +187,7 @@ mod tests {
                     Token::Literal("\"42\"".to_string()),
                     Token::Delimiter(';'),
                     Token::EOF,
-                ]
+                ],
             ),
             (
                 "a <= 2",
@@ -196,7 +196,7 @@ mod tests {
                     Token::Operator(LTE),
                     Token::Literal("2".to_string()),
                     Token::EOF,
-                ]
+                ],
             ),
         ];
 

@@ -30,21 +30,12 @@ impl Operator {
     pub(crate) fn rank(&self) -> usize {
         match self {
             Operator::Call(_) => 8,
-            Operator::Not
-            | Operator::Neg => 7,
-            Operator::Mul
-            | Operator::Div
-            | Operator::Mod => 6,
-            Operator::Add
-            | Operator::Sub => 5,
-            Operator::Lt
-            | Operator::Lte
-            | Operator::Gt
-            | Operator::Gte => 4,
-            Operator::Eq
-            | Operator::Ne => 3,
-            Operator::Or
-            | Operator::And => 2,
+            Operator::Not | Operator::Neg => 7,
+            Operator::Mul | Operator::Div | Operator::Mod => 6,
+            Operator::Add | Operator::Sub => 5,
+            Operator::Lt | Operator::Lte | Operator::Gt | Operator::Gte => 4,
+            Operator::Eq | Operator::Ne => 3,
+            Operator::Or | Operator::And => 2,
             Operator::Bind => 1,
         }
     }
@@ -155,8 +146,8 @@ impl PrefixParser for Operator {
             Operator::Not | Operator::Neg => {
                 let rhs = parse_expression(buffer, self.rank())?;
                 Ok(Expression::Prefix(self.clone(), Box::new(rhs)))
-            },
-            _ => Err(ParserError::Prefix(token.clone()))
+            }
+            _ => Err(ParserError::Prefix(token.clone())),
         }
     }
 }
@@ -165,13 +156,18 @@ fn get_prefix_parser(token: &Token) -> Option<impl PrefixParser> {
     match token {
         Token::Operator(DASH) => Some(Operator::Neg),
         Token::Operator(BANG) => Some(Operator::Not),
-        _ => None
+        _ => None,
     }
 }
 
 trait InfixParser {
     fn rank(&self) -> usize;
-    fn parse(&mut self, lhs: Expression, token: &Token, buffer: &Buffer<Token>) -> Result<Expression, ParserError>;
+    fn parse(
+        &mut self,
+        lhs: Expression,
+        token: &Token,
+        buffer: &Buffer<Token>,
+    ) -> Result<Expression, ParserError>;
 }
 
 impl InfixParser for Operator {
@@ -179,7 +175,12 @@ impl InfixParser for Operator {
         self.rank()
     }
 
-    fn parse(&mut self, lhs: Expression, token: &Token, buffer: &Buffer<Token>) -> Result<Expression, ParserError> {
+    fn parse(
+        &mut self,
+        lhs: Expression,
+        token: &Token,
+        buffer: &Buffer<Token>,
+    ) -> Result<Expression, ParserError> {
         match self {
             Operator::Add
             | Operator::Sub
@@ -195,9 +196,13 @@ impl InfixParser for Operator {
             | Operator::Eq
             | Operator::Ne => {
                 let rhs = parse_expression(buffer, self.rank())?;
-                Ok(Expression::Infix(Box::new(lhs), self.clone(), Box::new(rhs)))
-            },
-            _ => Err(ParserError::Infix(token.clone()))
+                Ok(Expression::Infix(
+                    Box::new(lhs),
+                    self.clone(),
+                    Box::new(rhs),
+                ))
+            }
+            _ => Err(ParserError::Infix(token.clone())),
         }
     }
 }
@@ -217,7 +222,7 @@ fn get_infix_parser(token: &Token) -> Option<impl InfixParser> {
         Token::Operator(NE) => Some(Operator::Ne),
         Token::Operator(AND) => Some(Operator::And),
         Token::Operator(OR) => Some(Operator::Or),
-        _ => None
+        _ => None,
     }
 }
 
@@ -275,7 +280,10 @@ fn parse_let_statement(buffer: &Buffer<Token>) -> Result<Statement, ParserError>
     let id = if let Token::Identifier(id) = token {
         id.to_owned()
     } else {
-        return Err(ParserError::Token(Token::Identifier("*".to_string()), token.clone()));
+        return Err(ParserError::Token(
+            Token::Identifier("*".to_string()),
+            token.clone(),
+        ));
     };
 
     let eq = next(buffer)?;
@@ -302,7 +310,11 @@ fn parse_if_expression(buffer: &Buffer<Token>) -> Result<Expression, ParserError
     } else {
         Expression::Unit
     };
-    Ok(Expression::If(Box::new(cond), Box::new(if_clause), Box::new(else_clause)))
+    Ok(Expression::If(
+        Box::new(cond),
+        Box::new(if_clause),
+        Box::new(else_clause),
+    ))
 }
 
 fn parse_fn_definition(buffer: &Buffer<Token>) -> Result<Statement, ParserError> {
@@ -310,7 +322,10 @@ fn parse_fn_definition(buffer: &Buffer<Token>) -> Result<Statement, ParserError>
     let name = if let Token::Identifier(id) = token {
         id.to_owned()
     } else {
-        return Err(ParserError::Token(Token::Identifier("*".to_string()), token.clone()));
+        return Err(ParserError::Token(
+            Token::Identifier("*".to_string()),
+            token.clone(),
+        ));
     };
 
     let mut args = Vec::new();
@@ -364,7 +379,10 @@ fn parse_fn_expression(buffer: &Buffer<Token>) -> Result<Expression, ParserError
     Ok(Expression::Fn(args, statements))
 }
 
-fn parse_fn_application(func: Expression, buffer: &Buffer<Token>) -> Result<Expression, ParserError> {
+fn parse_fn_application(
+    func: Expression,
+    buffer: &Buffer<Token>,
+) -> Result<Expression, ParserError> {
     expect(buffer, &Token::Delimiter('('))?;
     let mut args = Vec::new();
     loop {
@@ -397,167 +415,169 @@ mod tests {
         let tests = vec![
             (
                 "let ;",
-                Err(ParserError::Token(Token::Identifier("*".to_string()), Token::Delimiter(';')))
+                Err(ParserError::Token(
+                    Token::Identifier("*".to_string()),
+                    Token::Delimiter(';'),
+                )),
             ),
             (
                 "let 123",
-                Err(ParserError::Token(Token::Identifier("*".to_string()), Token::Literal("123".to_string())))
+                Err(ParserError::Token(
+                    Token::Identifier("*".to_string()),
+                    Token::Literal("123".to_string()),
+                )),
             ),
             (
                 "let abc;",
-                Err(ParserError::Token(Token::Operator(BIND), Token::Identifier("abc".to_string())))
+                Err(ParserError::Token(
+                    Token::Operator(BIND),
+                    Token::Identifier("abc".to_string()),
+                )),
             ),
             (
                 "let x =",
-                Err(ParserError::Token(Token::Keyword("*"), Token::EOF))
+                Err(ParserError::Token(Token::Keyword("*"), Token::EOF)),
             ),
             (
                 "let answer = 42;",
-                Ok(vec![
-                    Statement::Let("answer".to_string(), Expression::Lit("42".to_string()))
-                ])
+                Ok(vec![Statement::Let(
+                    "answer".to_string(),
+                    Expression::Lit("42".to_string()),
+                )]),
             ),
             (
                 "let result = x + 1;",
-                Ok(vec![
-                    Statement::Let("result".to_string(),
-                        Expression::Infix(
-                            Box::new(Expression::Var("x".to_string())),
-                            Operator::Add,
-                            Box::new(Expression::Lit("1".to_string()))
-                        ))
-                ])
+                Ok(vec![Statement::Let(
+                    "result".to_string(),
+                    Expression::Infix(
+                        Box::new(Expression::Var("x".to_string())),
+                        Operator::Add,
+                        Box::new(Expression::Lit("1".to_string())),
+                    ),
+                )]),
             ),
             (
                 "let flag = x >= 42;",
-                Ok(vec![
-                    Statement::Let("flag".to_string(),
-                                   Expression::Infix(
-                                       Box::new(Expression::Var("x".to_string())),
-                                       Operator::Gte,
-                                       Box::new(Expression::Lit("42".to_string()))
-                                   ))
-                ])
+                Ok(vec![Statement::Let(
+                    "flag".to_string(),
+                    Expression::Infix(
+                        Box::new(Expression::Var("x".to_string())),
+                        Operator::Gte,
+                        Box::new(Expression::Lit("42".to_string())),
+                    ),
+                )]),
             ),
             (
                 "return (a + 16) * k + 4;",
-                Ok(vec![
-                    Statement::Ret(Expression::Infix(
+                Ok(vec![Statement::Ret(Expression::Infix(
+                    Box::new(Expression::Infix(
                         Box::new(Expression::Infix(
-                            Box::new(Expression::Infix(
-                                Box::new(Expression::Var("a".to_string())),
-                                Operator::Add,
-                                Box::new(Expression::Lit("16".to_string())),
-                            )),
-                            Operator::Mul,
-                            Box::new(Expression::Var("k".to_string())),
+                            Box::new(Expression::Var("a".to_string())),
+                            Operator::Add,
+                            Box::new(Expression::Lit("16".to_string())),
                         )),
-                        Operator::Add,
-                        Box::new(Expression::Lit("4".to_string())),
-                    ))
-                ])
+                        Operator::Mul,
+                        Box::new(Expression::Var("k".to_string())),
+                    )),
+                    Operator::Add,
+                    Box::new(Expression::Lit("4".to_string())),
+                ))]),
             ),
             (
                 "fn add(a, b) { return a + b; }",
-                Ok(vec![
-                    Statement::Fn(
-                        "add".to_string(),
-                        vec![
-                            "a".to_string(),
-                            "b".to_string(),
-                        ],
-                    vec![
-                            Statement::Ret(Expression::Infix(
-                                Box::new(Expression::Var("a".to_string())),
-                                Operator::Add,
-                                Box::new(Expression::Var("b".to_string())),
-                            ))
-                        ])
-                ])
+                Ok(vec![Statement::Fn(
+                    "add".to_string(),
+                    vec!["a".to_string(), "b".to_string()],
+                    vec![Statement::Ret(Expression::Infix(
+                        Box::new(Expression::Var("a".to_string())),
+                        Operator::Add,
+                        Box::new(Expression::Var("b".to_string())),
+                    ))],
+                )]),
             ),
             (
                 "let x = fn(a) { return a; };",
-                Ok(vec![
-                    Statement::Let("x".to_string(),
+                Ok(vec![Statement::Let(
+                    "x".to_string(),
                     Expression::Fn(
                         vec!["a".to_string()],
-                    vec![Statement::Ret(Expression::Var("a".to_string()))]))
-                ])
+                        vec![Statement::Ret(Expression::Var("a".to_string()))],
+                    ),
+                )]),
             ),
             (
                 "return f(x);",
-                Ok(vec![
-                    Statement::Ret(Expression::Apply(
-                        Box::new(Expression::Var("f".to_string())),
-                        vec![
-                            Expression::Var("x".to_string())
-                        ]
-                    ))
-                ])
+                Ok(vec![Statement::Ret(Expression::Apply(
+                    Box::new(Expression::Var("f".to_string())),
+                    vec![Expression::Var("x".to_string())],
+                ))]),
             ),
             (
                 "fn sum(a, b) { return a + b; }",
-                Ok(vec![
-                    Statement::Fn("sum".to_string(),
-                                  vec!["a".to_string(), "b".to_string()],
-                                  vec![Statement::Ret(
-                                      Expression::Infix(
-                                          Box::new(Expression::Var("a".to_string())),
-                                          Operator::Add,
-                                          Box::new(Expression::Var("b".to_string()))))])
-                ])
+                Ok(vec![Statement::Fn(
+                    "sum".to_string(),
+                    vec!["a".to_string(), "b".to_string()],
+                    vec![Statement::Ret(Expression::Infix(
+                        Box::new(Expression::Var("a".to_string())),
+                        Operator::Add,
+                        Box::new(Expression::Var("b".to_string())),
+                    ))],
+                )]),
             ),
             (
                 "let f = fn(a, b) { return (a + b) / 2; };",
-                Ok(vec![
-                    Statement::Let("f".to_string(),
-                                   Expression::Fn(
-                                       vec!["a".to_string(), "b".to_string()],
-                                       vec![
-                                           Statement::Ret(Expression::Infix(
-                                               Box::new(Expression::Infix(
-                                                   Box::new(Expression::Var("a".to_string())),
-                                                   Operator::Add,
-                                                   Box::new(Expression::Var("b".to_string())))),
-                                               Operator::Div,
-                                               Box::new(Expression::Lit("2".to_string()))))]))
-                ])
+                Ok(vec![Statement::Let(
+                    "f".to_string(),
+                    Expression::Fn(
+                        vec!["a".to_string(), "b".to_string()],
+                        vec![Statement::Ret(Expression::Infix(
+                            Box::new(Expression::Infix(
+                                Box::new(Expression::Var("a".to_string())),
+                                Operator::Add,
+                                Box::new(Expression::Var("b".to_string())),
+                            )),
+                            Operator::Div,
+                            Box::new(Expression::Lit("2".to_string())),
+                        ))],
+                    ),
+                )]),
             ),
             (
                 "let x = (fn(a,b) {return a+b;})(1,2);",
-                Ok(vec![
-                    Statement::Let(
-                        "x".to_string(),
-                        Expression::Apply(
-                            Box::new(Expression::Fn(
-                                vec!["a".to_string(), "b".to_string()],
-                                vec![
-                                    Statement::Ret(
-                                        Expression::Infix(
-                                            Box::new(Expression::Var("a".to_string())),
-                                            Operator::Add,
-                                            Box::new(Expression::Var("b".to_string()))))])),
-                            vec![
-                                Expression::Lit("1".to_string()),
-                                Expression::Lit("2".to_string())]))
-                ])
+                Ok(vec![Statement::Let(
+                    "x".to_string(),
+                    Expression::Apply(
+                        Box::new(Expression::Fn(
+                            vec!["a".to_string(), "b".to_string()],
+                            vec![Statement::Ret(Expression::Infix(
+                                Box::new(Expression::Var("a".to_string())),
+                                Operator::Add,
+                                Box::new(Expression::Var("b".to_string())),
+                            ))],
+                        )),
+                        vec![
+                            Expression::Lit("1".to_string()),
+                            Expression::Lit("2".to_string()),
+                        ],
+                    ),
+                )]),
             ),
             (
                 "(fn(a,b) {return a+b;})(1,2);",
-                Ok(vec![
-                    Statement::Call(
-                        Box::new(Expression::Fn(
-                            vec!["a".to_string(), "b".to_string()],
-                            vec![
-                                Statement::Ret(
-                                    Expression::Infix(
-                                        Box::new(Expression::Var("a".to_string())),
-                                        Operator::Add,
-                                        Box::new(Expression::Var("b".to_string()))))])),
-                        vec![
-                            Expression::Lit("1".to_string()),
-                            Expression::Lit("2".to_string())])
-                ])
+                Ok(vec![Statement::Call(
+                    Box::new(Expression::Fn(
+                        vec!["a".to_string(), "b".to_string()],
+                        vec![Statement::Ret(Expression::Infix(
+                            Box::new(Expression::Var("a".to_string())),
+                            Operator::Add,
+                            Box::new(Expression::Var("b".to_string())),
+                        ))],
+                    )),
+                    vec![
+                        Expression::Lit("1".to_string()),
+                        Expression::Lit("2".to_string()),
+                    ],
+                )]),
             ),
         ];
 
@@ -575,133 +595,114 @@ mod tests {
         let tests = vec![
             (
                 "-x",
-                Ok(
-                    Expression::Prefix(
-                        Operator::Neg,
-                        Box::new(Expression::Var("x".to_string())))
-                )
+                Ok(Expression::Prefix(
+                    Operator::Neg,
+                    Box::new(Expression::Var("x".to_string())),
+                )),
             ),
             (
                 "!abc",
-                Ok(
-                    Expression::Prefix(
-                        Operator::Not,
-                        Box::new(Expression::Var("abc".to_string())))
-                )
+                Ok(Expression::Prefix(
+                    Operator::Not,
+                    Box::new(Expression::Var("abc".to_string())),
+                )),
             ),
             (
                 "1 + 2",
-                Ok(
-                    Expression::Infix(
-                        Box::new(Expression::Lit("1".to_string())),
-                        Operator::Add,
-                        Box::new(Expression::Lit("2".to_string()))
-                    )
-                )
+                Ok(Expression::Infix(
+                    Box::new(Expression::Lit("1".to_string())),
+                    Operator::Add,
+                    Box::new(Expression::Lit("2".to_string())),
+                )),
             ),
             (
                 "z != 42",
-                Ok(
-                    Expression::Infix(
-                        Box::new(Expression::Var("z".to_string())),
-                        Operator::Ne,
-                        Box::new(Expression::Lit("42".to_string()))
-                    )
-                )
+                Ok(Expression::Infix(
+                    Box::new(Expression::Var("z".to_string())),
+                    Operator::Ne,
+                    Box::new(Expression::Lit("42".to_string())),
+                )),
             ),
             (
                 "a <= 2",
-                Ok(
-                    Expression::Infix(
-                        Box::new(Expression::Var("a".to_string())),
-                        Operator::Lte,
-                        Box::new(Expression::Lit("2".to_string()))
-                    )
-                )
+                Ok(Expression::Infix(
+                    Box::new(Expression::Var("a".to_string())),
+                    Operator::Lte,
+                    Box::new(Expression::Lit("2".to_string())),
+                )),
             ),
             (
                 "n % 42",
-                Ok(
-                    Expression::Infix(
-                        Box::new(Expression::Var("n".to_string())),
-                        Operator::Mod,
-                        Box::new(Expression::Lit("42".to_string()))
-                    )
-                )
+                Ok(Expression::Infix(
+                    Box::new(Expression::Var("n".to_string())),
+                    Operator::Mod,
+                    Box::new(Expression::Lit("42".to_string())),
+                )),
             ),
             (
                 "x + 1 / 2",
-                Ok(
-                    Expression::Infix(
-                        Box::new(Expression::Var("x".to_string())),
-                        Operator::Add,
-                        Box::new(Expression::Infix(
-                            Box::new(Expression::Lit("1".to_string())),
-                            Operator::Div,
-                            Box::new(Expression::Lit("2".to_string())))),
-                    )
-                )
+                Ok(Expression::Infix(
+                    Box::new(Expression::Var("x".to_string())),
+                    Operator::Add,
+                    Box::new(Expression::Infix(
+                        Box::new(Expression::Lit("1".to_string())),
+                        Operator::Div,
+                        Box::new(Expression::Lit("2".to_string())),
+                    )),
+                )),
             ),
             (
                 "a * 2 + 1",
-                Ok(
-                    Expression::Infix(
-                        Box::new(Expression::Infix(
-                            Box::new(Expression::Var("a".to_string())),
-                            Operator::Mul,
-                            Box::new(Expression::Lit("2".to_string())))),
-                        Operator::Add,
-                        Box::new(Expression::Lit("1".to_string())),
-                    )
-                )
+                Ok(Expression::Infix(
+                    Box::new(Expression::Infix(
+                        Box::new(Expression::Var("a".to_string())),
+                        Operator::Mul,
+                        Box::new(Expression::Lit("2".to_string())),
+                    )),
+                    Operator::Add,
+                    Box::new(Expression::Lit("1".to_string())),
+                )),
             ),
             (
                 "(abc + 3) * 4",
-                Ok(
-                    Expression::Infix(
-                        Box::new(Expression::Infix(
-                            Box::new(Expression::Var("abc".to_string())),
-                            Operator::Add,
-                            Box::new(Expression::Lit("3".to_string())))),
-                        Operator::Mul,
-                        Box::new(Expression::Lit("4".to_string())),
-                    )
-                )
+                Ok(Expression::Infix(
+                    Box::new(Expression::Infix(
+                        Box::new(Expression::Var("abc".to_string())),
+                        Operator::Add,
+                        Box::new(Expression::Lit("3".to_string())),
+                    )),
+                    Operator::Mul,
+                    Box::new(Expression::Lit("4".to_string())),
+                )),
             ),
-            (
-                "(((42)))",
-                Ok(
-                    Expression::Lit("42".to_string())
-                )
-            ),
+            ("(((42)))", Ok(Expression::Lit("42".to_string()))),
             (
                 "2 * (x + 3)",
-                Ok(
-                    Expression::Infix(
-                        Box::new(Expression::Lit("2".to_string())),
-                        Operator::Mul,
-                        Box::new(Expression::Infix(
-                            Box::new(Expression::Var("x".to_string())),
-                            Operator::Add,
-                            Box::new(Expression::Lit("3".to_string())))),
-                    )
-                )
+                Ok(Expression::Infix(
+                    Box::new(Expression::Lit("2".to_string())),
+                    Operator::Mul,
+                    Box::new(Expression::Infix(
+                        Box::new(Expression::Var("x".to_string())),
+                        Operator::Add,
+                        Box::new(Expression::Lit("3".to_string())),
+                    )),
+                )),
             ),
             (
                 "(a + b) * (c - d)",
-                Ok(
-                    Expression::Infix(
-                        Box::new(Expression::Infix(
-                            Box::new(Expression::Var("a".to_string())),
-                            Operator::Add,
-                            Box::new(Expression::Var("b".to_string())))),
-                        Operator::Mul,
-                        Box::new(Expression::Infix(
-                            Box::new(Expression::Var("c".to_string())),
-                            Operator::Sub,
-                            Box::new(Expression::Var("d".to_string())))),
-                    )
-                )
+                Ok(Expression::Infix(
+                    Box::new(Expression::Infix(
+                        Box::new(Expression::Var("a".to_string())),
+                        Operator::Add,
+                        Box::new(Expression::Var("b".to_string())),
+                    )),
+                    Operator::Mul,
+                    Box::new(Expression::Infix(
+                        Box::new(Expression::Var("c".to_string())),
+                        Operator::Sub,
+                        Box::new(Expression::Var("d".to_string())),
+                    )),
+                )),
             ),
             (
                 "a >= 42 && x != 1",
@@ -716,8 +717,8 @@ mod tests {
                         Box::new(Expression::Var("x".to_string())),
                         Operator::Ne,
                         Box::new(Expression::Lit("1".to_string())),
-                    ))
-                ))
+                    )),
+                )),
             ),
             (
                 "x == 0 || y <= 42",
@@ -732,26 +733,25 @@ mod tests {
                         Box::new(Expression::Var("y".to_string())),
                         Operator::Lte,
                         Box::new(Expression::Lit("42".to_string())),
-                    ))
-                ))
+                    )),
+                )),
             ),
             (
                 "(fn(a,b) {return a+b;})(1,2)",
                 Ok(Expression::Apply(
                     Box::new(Expression::Fn(
                         vec!["a".to_string(), "b".to_string()],
-                        vec![Statement::Ret(
-                            Expression::Infix(
-                                Box::new(Expression::Var("a".to_string())),
-                                Operator::Add,
-                                Box::new(Expression::Var("b".to_string())),
-                            ))]
+                        vec![Statement::Ret(Expression::Infix(
+                            Box::new(Expression::Var("a".to_string())),
+                            Operator::Add,
+                            Box::new(Expression::Var("b".to_string())),
+                        ))],
                     )),
                     vec![
                         Expression::Lit("1".to_string()),
                         Expression::Lit("2".to_string()),
-                    ]
-                ))
+                    ],
+                )),
             ),
             (
                 "if a == 0 { x + 1 } else { y - 2 }",
@@ -764,12 +764,14 @@ mod tests {
                     Box::new(Expression::Infix(
                         Box::new(Expression::Var("x".to_string())),
                         Operator::Add,
-                        Box::new(Expression::Lit("1".to_string())))),
+                        Box::new(Expression::Lit("1".to_string())),
+                    )),
                     Box::new(Expression::Infix(
                         Box::new(Expression::Var("y".to_string())),
                         Operator::Sub,
-                        Box::new(Expression::Lit("2".to_string()))))
-                ))
+                        Box::new(Expression::Lit("2".to_string())),
+                    )),
+                )),
             ),
             (
                 "if a { f(x) } else { g(y) }",
@@ -777,11 +779,14 @@ mod tests {
                     Box::new(Expression::Var("a".to_string())),
                     Box::new(Expression::Apply(
                         Box::new(Expression::Var("f".to_string())),
-                                      vec![Expression::Var("x".to_string())])),
-                    Box::new(Expression::Apply(Box::new(Expression::Var("g".to_string())),
-                                      vec![Expression::Var("y".to_string())]))))
-
-            )
+                        vec![Expression::Var("x".to_string())],
+                    )),
+                    Box::new(Expression::Apply(
+                        Box::new(Expression::Var("g".to_string())),
+                        vec![Expression::Var("y".to_string())],
+                    )),
+                )),
+            ),
         ];
 
         for (src, expected) in tests {

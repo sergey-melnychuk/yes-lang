@@ -1,8 +1,8 @@
+pub(crate) mod buffer;
 pub(crate) mod error;
 pub(crate) mod lexer;
 pub(crate) mod parser;
 pub(crate) mod token;
-pub(crate) mod buffer;
 
 use std::io;
 use std::io::{BufRead, Write};
@@ -32,23 +32,25 @@ fn main() {
         let (lex, tree) = {
             let buf = Buffer::from_string(&line);
             let (tokens, lexer) = match tokenize(&buf) {
-                Ok(tokens) =>
-                    (tokens.clone(),
-                     tokens.iter()
+                Ok(tokens) => (
+                    tokens.clone(),
+                    tokens
+                        .iter()
                         .map(|t| format!("\t{:?}", t))
                         .collect::<Vec<_>>()
-                        .join("\n")),
-                Err(e) => (vec![], format!("{}", e))
+                        .join("\n"),
+                ),
+                Err(e) => (vec![], format!("{}", e)),
             };
 
             let buf = Buffer::new(tokens);
             let tree = match parse(&buf) {
-                Ok(statements) =>
-                    statements.iter()
-                        .map(|stmt| format!("\t{:?}", stmt))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                Err(e) => format!("{}", e)
+                Ok(statements) => statements
+                    .iter()
+                    .map(|stmt| format!("\t{:?}", stmt))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                Err(e) => format!("{}", e),
             };
             (lexer, tree)
         };
