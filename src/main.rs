@@ -8,12 +8,17 @@ pub(crate) mod eval;
 use std::io;
 use std::io::{BufRead, Write};
 
+use crate::error::Error;
 use crate::buffer::Buffer;
 use crate::lexer::tokenize;
 use crate::parser::parse;
+use crate::eval::{eval, Object, Context};
 
 fn main() {
     println!("REPL: enter :q to quit.");
+
+    let mut ctx = Context::default();
+
     let stdin = io::stdin();
     loop {
         print!("> ");
@@ -30,31 +35,21 @@ fn main() {
             break;
         }
 
-        let (lex, tree) = {
-            let buf = Buffer::from_string(&line);
-            let (tokens, lexer) = match tokenize(&buf) {
-                Ok(tokens) => (
-                    tokens.clone(),
-                    tokens
-                        .iter()
-                        .map(|t| format!("\t{:?}", t))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                ),
-                Err(e) => (vec![], format!("{}", e)),
-            };
-
-            let buf = Buffer::new(tokens);
-            let tree = match parse(&buf) {
-                Ok(statements) => statements
-                    .iter()
-                    .map(|stmt| format!("\t{:?}", stmt))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                Err(e) => format!("{}", e),
-            };
-            (lexer, tree)
-        };
-        println!("[\n{}\n]\n[\n{}\n]", lex, tree);
+        match repl(line, &mut ctx) {
+            Ok(obj) => println!("{}", obj),
+            Err(e) => eprintln!("Error: {}", e)
+        }
     }
 }
+
+fn repl(line: String, ctx: &mut Context) -> Result<Object, Error> {
+    let buf = Buffer::from_string(&line);
+    let tokens = tokenize(&buf)?;
+    dbg!(&tokens);
+    let buf = Buffer::new(tokens);
+    let tree = parse(&buf)?;
+    dbg!(&tree);
+    let obj = eval(tree, ctx)?;
+    Ok(obj)
+}
+
