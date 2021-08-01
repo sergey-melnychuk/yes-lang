@@ -48,6 +48,7 @@ pub(crate) enum Statement {
     If(Expression, Expression, Expression),
     Fn(String, Vec<String>, Vec<Statement>),
     Call(Box<Expression>, Vec<Expression>),
+    Expr(Expression),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -78,20 +79,20 @@ pub(crate) fn parse(buffer: &Buffer<Token>) -> Result<Vec<Statement>, ParserErro
         };
 
         if token == &Token::Keyword(LET) {
-            let stmt = parse_let_statement(&buffer)?;
+            let stmt = parse_let_statement(buffer)?;
             result.push(stmt);
         } else if token == &Token::Keyword(RETURN) {
-            let expr = parse_expression(&buffer, Operator::MIN_RANK)?;
+            let expr = parse_expression(buffer, Operator::MIN_RANK)?;
             expect(buffer, &Token::Delimiter(';'))?;
             let stmt = Statement::Ret(expr);
             result.push(stmt);
         } else if token == &Token::Keyword(IF) {
-            if let Expression::If(cond, if_clause, else_clause) = parse_if_expression(&buffer)? {
+            if let Expression::If(cond, if_clause, else_clause) = parse_if_expression(buffer)? {
                 let stmt = Statement::If(*cond, *if_clause, *else_clause);
                 result.push(stmt);
             }
         } else if token == &Token::Keyword(FN) {
-            let stmt = parse_fn_definition(&buffer)?;
+            let stmt = parse_fn_definition(buffer)?;
             result.push(stmt);
         } else if token == &Token::Delimiter('(') {
             let expr = parse_expression(buffer, Operator::MIN_RANK)?;
@@ -103,6 +104,11 @@ pub(crate) fn parse(buffer: &Buffer<Token>) -> Result<Vec<Statement>, ParserErro
             }
         } else {
             buffer.back();
+            if let Ok(expr) = parse_expression(buffer, Operator::MIN_RANK) {
+                let stmt = Statement::Expr(expr);
+                result.push(stmt);
+            }
+            // TODO check if stream contains only EOF
             return Ok(result);
         }
     }
@@ -262,6 +268,7 @@ fn parse_expression(buffer: &Buffer<Token>, rank: usize) -> Result<Expression, P
 
     while let Token::Operator(_) = peek(buffer)? {
         let token = peek(buffer)?;
+        dbg!(token); // TODO FIXME infinite loop on "a = b" (invalid expression)
         if let Some(mut op) = get_infix_parser(token) {
             if rank < op.rank() {
                 let _ = next(buffer)?;
@@ -579,6 +586,14 @@ mod tests {
                     ],
                 )]),
             ),
+            (
+                "x + y",
+                Ok(vec![Statement::Expr(Expression::Infix(
+                    Box::new(Expression::Var("x".to_string())),
+                    Operator::Add,
+                    Box::new(Expression::Var("y".to_string())),
+                ))])
+            ),
         ];
 
         for (src, expected) in tests {
@@ -787,12 +802,17 @@ mod tests {
                     )),
                 )),
             ),
+            // TODO FIXME
+            // (
+            //     "a = b",
+            //     Ok(Expression::Unit),
+            // )
         ];
 
         for (src, expected) in tests {
             let tokens = tokenize(&mut Buffer::from_string(src)).unwrap();
-            let mut buffer = Buffer::new(tokens);
-            let parsed = parse_expression(&mut buffer, Operator::MIN_RANK);
+            let buffer = Buffer::new(tokens);
+            let parsed = parse_expression(&buffer, Operator::MIN_RANK);
 
             assert_eq!(parsed, expected, "{}", src);
         }
