@@ -104,11 +104,13 @@ pub(crate) fn parse(buffer: &Buffer<Token>) -> Result<Vec<Statement>, ParserErro
             }
         } else {
             buffer.back();
+            let pos = buffer.pos();
             if let Ok(expr) = parse_expression(buffer, Operator::MIN_RANK) {
                 let stmt = Statement::Expr(expr);
                 result.push(stmt);
+            } else {
+                buffer.set(pos);
             }
-            // TODO check if stream contains only EOF
             return Ok(result);
         }
     }
