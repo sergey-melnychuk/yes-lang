@@ -1,7 +1,8 @@
-use crate::parser::Expression;
+use crate::parser::{Expression, Operator, Statement};
 use crate::error::EvalError;
 use crate::token::*;
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum Object {
@@ -11,6 +12,19 @@ pub(crate) enum Object {
     Bool(bool),
     Str(String),
     //Func,
+}
+
+impl Display for Object {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Object::Unit => write!(f, "()"),
+            Object::Int(x) => write!(f, "{}", x),
+            Object::Float(x) => write!(f, "{}", x),
+            Object::Bool(true) => write!(f, "true"),
+            Object::Bool(false) => write!(f, "false"),
+            Object::Str(x) => write!(f, "{}", x)
+        }
+    }
 }
 
 fn is_quoted(s: &str) -> bool {
@@ -69,7 +83,15 @@ impl<'a> Context<'a> {
     }
 }
 
-pub(crate) fn eval(expr: &Expression, ctx: Context) -> Result<Object, EvalError> {
+pub(crate) fn eval(_statements: Vec<Statement>, _ctx: &mut Context) -> Result<Object, EvalError> {
+    Ok(Object::Unit) // TODO
+}
+
+fn eval_stmt(_stmt: &Statement, ctx: Context) -> Result<Object, EvalError> {
+    Ok(Object::Unit) // TODO
+}
+
+fn eval_expr(expr: &Expression, ctx: Context) -> Result<Object, EvalError> {
     match expr {
         Expression::Lit(str) if TRUE == str => Ok(Object::Bool(true)),
         Expression::Lit(str) if FALSE == str => Ok(Object::Bool(false)),
@@ -81,6 +103,47 @@ pub(crate) fn eval(expr: &Expression, ctx: Context) -> Result<Object, EvalError>
         Expression::Var(name) if ctx.has(name) => Ok(ctx.get(name).cloned().unwrap()),
         Expression::Var(name) => Err(EvalError::NotFound(name.to_string())),
         _ => todo!()
+    }
+}
+
+fn eval_prefix(op: Operator, obj: Object) -> Result<Object, EvalError> {
+    match (op, obj) {
+        (Operator::Neg, Object::Int(x)) => Ok(Object::Int(-x)),
+        (Operator::Neg, Object::Float(x)) => Ok(Object::Float(-x)),
+        (Operator::Not, Object::Bool(b)) => Ok(Object::Bool(!b)),
+        (op, obj) => Err(EvalError::PrefixOp(op, obj))
+    }
+}
+
+fn eval_infix(op: Operator, lhs: Object, rhs: Object, ctx: Context) -> Result<Object, EvalError> {
+    match (op, lhs, rhs) {
+        (Operator::Add, Object::Int(a), Object::Int(b)) => Ok(Object::Int(a + b)),
+        (Operator::Sub, Object::Int(a), Object::Int(b)) => Ok(Object::Int(a - b)),
+        (Operator::Mul, Object::Int(a), Object::Int(b)) => Ok(Object::Int(a * b)),
+        (Operator::Div, Object::Int(a), Object::Int(b)) => Ok(Object::Int(a / b)),
+        (Operator::Mod, Object::Int(a), Object::Int(b)) => Ok(Object::Int(a % b)),
+
+        (Operator::Add, Object::Float(a), Object::Float(b)) => Ok(Object::Float(a + b)),
+        (Operator::Sub, Object::Float(a), Object::Float(b)) => Ok(Object::Float(a - b)),
+        (Operator::Mul, Object::Float(a), Object::Float(b)) => Ok(Object::Float(a * b)),
+        (Operator::Div, Object::Float(a), Object::Float(b)) => Ok(Object::Float(a / b)),
+        (Operator::Mod, Object::Float(a), Object::Float(b)) => Ok(Object::Float(a % b)),
+
+        (Operator::Add, Object::Int(a), Object::Float(b)) => Ok(Object::Float(a as f64 + b)),
+        (Operator::Sub, Object::Int(a), Object::Float(b)) => Ok(Object::Float(a as f64 - b)),
+        (Operator::Mul, Object::Int(a), Object::Float(b)) => Ok(Object::Float(a as f64 * b)),
+        (Operator::Div, Object::Int(a), Object::Float(b)) => Ok(Object::Float(a as f64 / b)),
+        (Operator::Mod, Object::Int(a), Object::Float(b)) => Ok(Object::Float(a as f64 % b)),
+
+        (Operator::Add, Object::Float(a), Object::Int(b)) => Ok(Object::Float(a + b as f64)),
+        (Operator::Sub, Object::Float(a), Object::Int(b)) => Ok(Object::Float(a - b as f64)),
+        (Operator::Mul, Object::Float(a), Object::Int(b)) => Ok(Object::Float(a * b as f64)),
+        (Operator::Div, Object::Float(a), Object::Int(b)) => Ok(Object::Float(a / b as f64)),
+        (Operator::Mod, Object::Float(a), Object::Int(b)) => Ok(Object::Float(a % b as f64)),
+
+        (Operator::Add, Object::Str(a), Object::Str(b)) => Ok(Object::Str(a.clone() + &b)),
+
+        (op, lhs, rhs) => Err(EvalError::InfixOp(op, lhs, rhs))
     }
 }
 
@@ -107,7 +170,7 @@ mod tests {
                     ctx.put(name, object);
                     ctx
                 });
-            let res = eval(&expr, ctx).unwrap();
+            let res = eval_expr(&expr, ctx).unwrap();
 
             assert_eq!(res, obj, "expr={:?} obj={:?} res={:?}", expr, obj, res);
         }
