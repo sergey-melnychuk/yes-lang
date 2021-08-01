@@ -8,6 +8,8 @@ pub(crate) trait Iterable<T: 'static> {
 
 pub(crate) struct Buffer<T: 'static>(Vec<T>, RefCell<usize>);
 
+pub(crate) struct Pos(usize);
+
 impl Buffer<char> {
     pub(crate) fn from_string(s: &str) -> Self {
         Self(s.chars().collect(), RefCell::new(0))
@@ -17,6 +19,18 @@ impl Buffer<char> {
 impl<T: 'static> Buffer<T> {
     pub(crate) fn new(vec: Vec<T>) -> Self {
         Self(vec, RefCell::new(0))
+    }
+
+    pub(crate) fn pos(&self) -> Pos {
+        Pos(*self.1.borrow())
+    }
+
+    pub(crate) fn set(&self, pos: Pos) {
+        *self.1.borrow_mut() = pos.0;
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        *self.1.borrow() == self.0.len()
     }
 }
 
@@ -36,7 +50,7 @@ impl<T: 'static> Iterable<T> for Buffer<T> {
 
     fn back(&self) {
         let mut r = self.1.borrow_mut();
-        if *r > 1 {
+        if *r > 0 {
             *r -= 1;
         }
     }
