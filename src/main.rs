@@ -45,7 +45,6 @@ fn main() {
 fn repl(line: String, ctx: &mut Context) -> Result<Object, Error> {
     let buf = Buffer::from_string(&line);
     let tokens = tokenize(&buf)?;
-    dbg!(&tokens);
     let buf = Buffer::new(tokens);
     let tree = parse(&buf)?;
     dbg!(&tree);

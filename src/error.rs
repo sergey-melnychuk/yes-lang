@@ -54,7 +54,10 @@ pub(crate) enum EvalError {
     NotFound(String),
     InfixOp(Operator, Object, Object),
     PrefixOp(Operator, Object),
-    Other(String),
+    NotBoolean(Object),
+    NotFunction(String),
+    Apply(Expression),
+    ApplyArgsCount(usize, usize)
 }
 
 impl Display for EvalError {
@@ -70,8 +73,14 @@ impl Display for EvalError {
                 write!(f, "Cannot apply: '{:?}' {:?} '{:?}'", op, lhs, rhs),
             EvalError::PrefixOp(op, obj) =>
                 write!(f, "Cannot apply: {:?} '{:?}'", op, obj),
-            EvalError::Other(msg) =>
-                write!(f, "Evaluation failed: {}", msg)
+            EvalError::NotBoolean(obj) =>
+                write!(f, "Expected boolean but got '{}'", obj),
+            EvalError::NotFunction(obj) =>
+                write!(f, "'{}' is not a function", obj),
+            EvalError::Apply(expr) =>
+                write!(f, "Cannot apply: '{:?}'", expr),
+            EvalError::ApplyArgsCount(exp, got) =>
+                write!(f, "Cannot apply: expected {} arguments but got {}", exp, got)
         }
     }
 }

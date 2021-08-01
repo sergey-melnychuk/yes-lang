@@ -1,8 +1,9 @@
-use crate::parser::{Expression, Operator, Statement};
-use crate::error::EvalError;
-use crate::token::*;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
+
+use crate::token::*;
+use crate::error::EvalError;
+use crate::parser::{Expression, Operator, Statement};
 
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum Object {
@@ -11,7 +12,7 @@ pub(crate) enum Object {
     Float(f64),
     Bool(bool),
     Str(String),
-    //Func,
+    Func(Vec<String>, Vec<Statement>),
 }
 
 impl Display for Object {
@@ -22,7 +23,8 @@ impl Display for Object {
             Object::Float(x) => write!(f, "{}", x),
             Object::Bool(true) => write!(f, "true"),
             Object::Bool(false) => write!(f, "false"),
-            Object::Str(x) => write!(f, "{}", x)
+            Object::Str(x) => write!(f, "{}", x),
+            Object::Func(_, _) => write!(f, "<function>"),
         }
     }
 }
@@ -56,13 +58,6 @@ pub(crate) struct Context<'a> {
 }
 
 impl<'a> Context<'a> {
-    fn empty() -> Self {
-        Self {
-            parent: None,
-            objects: Default::default(),
-        }
-    }
-
     fn fork(&'a self) -> Self {
         Self {
             parent: Some(self),
@@ -76,19 +71,57 @@ impl<'a> Context<'a> {
 
     fn get(&self, name: &str) -> Option<&Object> {
         self.objects.get(name)
+            .or_else(|| match self.parent {
+                Some(p) => p.get(name),
+                None => None
+            })
     }
 
     fn has(&self, name: &str) -> bool {
-        self.objects.contains_key(name)
+        self.objects.contains_key(name) || self.parent.map(|p| p.has(name)).unwrap_or_default()
     }
 }
 
-pub(crate) fn eval(_statements: Vec<Statement>, _ctx: &mut Context) -> Result<Object, EvalError> {
-    Ok(Object::Unit) // TODO
+pub(crate) fn eval(statements: Vec<Statement>, ctx: &mut Context) -> Result<Object, EvalError> {
+    let mut result = Object::Unit;
+    for stmt in statements {
+        result = eval_stmt(&stmt, ctx)?;
+    }
+    Ok(result)
 }
 
-fn eval_stmt(_stmt: &Statement, ctx: Context) -> Result<Object, EvalError> {
-    Ok(Object::Unit) // TODO
+fn eval_stmt(stmt: &Statement, ctx: &mut Context) -> Result<Object, EvalError> {
+    match stmt {
+        Statement::Let(name, expr) => {
+            let obj = eval_expr(expr, ctx.fork())?;
+            ctx.put(name.clone(), obj.clone());
+            Ok(obj)
+        },
+
+        Statement::Ret(expr) =>
+            eval_expr(expr, ctx.fork()),
+
+        Statement::If(expr, if_clause, else_clause) => {
+            let cond = eval_expr(expr, ctx.fork())?;
+            match cond {
+                Object::Bool(true) => eval_expr(if_clause, ctx.fork()),
+                Object::Bool(false) => eval_expr(else_clause, ctx.fork()),
+                obj => Err(EvalError::NotBoolean(obj))
+            }
+        },
+
+        Statement::Fn(name, args, body) => {
+            let f = Object::Func(args.to_owned(), body.to_owned());
+            ctx.put(name.clone(), f.clone());
+            Ok(f)
+        }
+
+        Statement::Call(lhs, rhs) =>
+            eval_fn_expr(lhs, rhs, ctx.fork()),
+
+        Statement::Expr(expr) =>
+            eval_expr(expr, ctx.fork()),
+    }
 }
 
 fn eval_expr(expr: &Expression, ctx: Context) -> Result<Object, EvalError> {
@@ -102,7 +135,37 @@ fn eval_expr(expr: &Expression, ctx: Context) -> Result<Object, EvalError> {
 
         Expression::Var(name) if ctx.has(name) => Ok(ctx.get(name).cloned().unwrap()),
         Expression::Var(name) => Err(EvalError::NotFound(name.to_string())),
-        _ => todo!()
+
+        Expression::Prefix(op, rhs) =>
+            eval_prefix(op.clone(), eval_expr(rhs, ctx.fork())?),
+
+        Expression::Infix(lhs, op, rhs) =>
+            eval_infix(
+                op.clone(),
+                eval_expr(lhs, ctx.fork())?,
+                eval_expr(rhs, ctx.fork())?),
+
+        Expression::If(expr, if_clause, else_clause) => {
+            let cond = eval_expr(expr, ctx.fork())?;
+            match cond {
+                Object::Bool(true) => eval_expr(if_clause, ctx.fork()),
+                Object::Bool(false) => eval_expr(else_clause, ctx.fork()),
+                obj => Err(EvalError::NotBoolean(obj))
+            }
+        }
+
+        Expression::Fn(args, body) => {
+            Ok(Object::Func(args.to_owned(), body.to_owned()))
+        }
+
+        Expression::Apply(lhs, rhs) => {
+            eval_fn_expr(lhs, rhs, ctx.fork())
+        }
+
+        expr => {
+            dbg!(expr);
+            unreachable!()
+        }
     }
 }
 
@@ -115,7 +178,7 @@ fn eval_prefix(op: Operator, obj: Object) -> Result<Object, EvalError> {
     }
 }
 
-fn eval_infix(op: Operator, lhs: Object, rhs: Object, ctx: Context) -> Result<Object, EvalError> {
+fn eval_infix(op: Operator, lhs: Object, rhs: Object) -> Result<Object, EvalError> {
     match (op, lhs, rhs) {
         (Operator::Add, Object::Int(a), Object::Int(b)) => Ok(Object::Int(a + b)),
         (Operator::Sub, Object::Int(a), Object::Int(b)) => Ok(Object::Int(a - b)),
@@ -147,20 +210,60 @@ fn eval_infix(op: Operator, lhs: Object, rhs: Object, ctx: Context) -> Result<Ob
     }
 }
 
+fn eval_fn_expr(lhs: &Expression, rhs: &[Expression], ctx: Context) -> Result<Object, EvalError> {
+    match lhs {
+        Expression::Var(name) if ctx.has(name) => {
+            if let Object::Func(args, body) = ctx.get(name).unwrap() {
+                eval_fn(args, body, rhs, ctx.fork())
+            } else {
+                Err(EvalError::NotFunction(name.clone()))
+            }
+        }
+        Expression::Var(name) => {
+            Err(EvalError::NotFound(name.to_string()))
+        },
+        Expression::Fn(args, body) => {
+            eval_fn(&args, &body, rhs, ctx.fork())
+        },
+        _ => Err(EvalError::Apply(lhs.clone()))
+    }
+}
+
+fn eval_fn(args: &[String], body: &[Statement], rhs: &[Expression], mut ctx: Context) -> Result<Object, EvalError> {
+    if args.len() != rhs.len() {
+        return Err(EvalError::ApplyArgsCount(args.len(), rhs.len()));
+    }
+
+    for (name, expr) in args.into_iter().zip(rhs.into_iter()) {
+        let obj = eval_expr(expr, ctx.fork())?;
+        ctx.put(name.clone(), obj);
+    }
+
+    let mut result = Object::Unit;
+    for stmt in body {
+        result = eval_stmt(stmt, &mut ctx)?;
+    }
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::parse;
+    use crate::buffer::Buffer;
 
     #[test]
-    fn test_eval() {
+    fn test_eval_expr() {
         let tests = vec![
-            (Expression::Lit(TRUE.to_string()), vec![], Object::Bool(true)),
-            (Expression::Lit(FALSE.to_string()), vec![], Object::Bool(false)),
-            (Expression::Lit("123".to_string()), vec![], Object::Int(123)),
-            (Expression::Lit("1.23".to_string()), vec![], Object::Float(1.23)),
-            (Expression::Lit("\"hello\"".to_string()), vec![], Object::Str("hello".to_string())),
-            (Expression::Unit, vec![], Object::Unit),
-            (Expression::Var("x".to_string()), vec![("x".to_string(), Object::Int(42))], Object::Int(42)),
+            (Expression::Unit, vec![], Ok(Object::Unit)),
+            (Expression::Lit(TRUE.to_string()), vec![], Ok(Object::Bool(true))),
+            (Expression::Lit(FALSE.to_string()), vec![], Ok(Object::Bool(false))),
+            (Expression::Lit("123".to_string()), vec![], Ok(Object::Int(123))),
+            (Expression::Lit("1.23".to_string()), vec![], Ok(Object::Float(1.23))),
+            (Expression::Lit("\"hello\"".to_string()), vec![], Ok(Object::Str("hello".to_string()))),
+            (Expression::Var("x".to_string()), vec![("x".to_string(), Object::Int(42))], Ok(Object::Int(42))),
         ];
 
         for (expr, map, obj) in tests {
@@ -170,9 +273,51 @@ mod tests {
                     ctx.put(name, object);
                     ctx
                 });
-            let res = eval_expr(&expr, ctx).unwrap();
+            let res = eval_expr(&expr, ctx);
 
             assert_eq!(res, obj, "expr={:?} obj={:?} res={:?}", expr, obj, res);
+        }
+    }
+
+    #[test]
+    fn test_repl() {
+        let tests = vec![
+            (
+                vec![
+                    "(fn (name) { return \"hello_\" + name; })(\"world\");",
+                ],
+                Ok(Object::Str("hello_world".to_string())),
+            ),
+            (
+                vec![
+                    "let x = 1;",
+                    "x + 1"
+                ],
+                Ok(Object::Int(2)),
+            ),
+            (
+                vec![
+                    "let f = fn(a, b) { return a + b; };",
+                    "let c = f(1, 2);",
+                    "c"
+                ],
+                Ok(Object::Int(3)),
+            ),
+        ];
+
+        for (src, obj) in tests {
+            let mut ctx = Context::default();
+
+            let mut res = Ok(Object::Unit);
+            for line in src.iter() {
+                let buf = Buffer::from_string(line);
+                let tokens = tokenize(&buf).unwrap();
+                let buf = Buffer::new(tokens);
+                let tree = parse(&buf).unwrap();
+                res = eval(tree, &mut ctx);
+            }
+
+            assert_eq!(res, obj, "{:#?}", src);
         }
     }
 }

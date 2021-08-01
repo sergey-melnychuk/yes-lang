@@ -41,7 +41,7 @@ impl Operator {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub(crate) enum Statement {
     Let(String, Expression),
     Ret(Expression),
@@ -51,7 +51,7 @@ pub(crate) enum Statement {
     Expr(Expression),
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub(crate) enum Expression {
     Unit,
     Var(String),

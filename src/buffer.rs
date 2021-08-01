@@ -28,10 +28,6 @@ impl<T: 'static> Buffer<T> {
     pub(crate) fn set(&self, pos: Pos) {
         *self.1.borrow_mut() = pos.0;
     }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        *self.1.borrow() == self.0.len()
-    }
 }
 
 impl<T: 'static> Iterable<T> for Buffer<T> {
