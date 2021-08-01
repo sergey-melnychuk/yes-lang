@@ -198,6 +198,14 @@ mod tests {
                     Token::EOF,
                 ],
             ),
+            // TODO fix tokenization of quoted string literals
+            // (
+            //     "\"hello \"",
+            //     vec![
+            //         Token::Literal("\"hello \"".to_string()),
+            //         Token::EOF,
+            //     ]
+            // )
         ];
 
         for (code, expected) in tests {
