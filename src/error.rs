@@ -1,7 +1,7 @@
 use crate::token::Token;
 use std::fmt::{Display, Formatter};
 use std::num::{ParseIntError, ParseFloatError};
-use crate::parser::Operator;
+use crate::parser::{Operator, Expression};
 use crate::eval::Object;
 
 #[allow(dead_code)]
@@ -28,6 +28,7 @@ pub(crate) enum ParserError {
     Token(Token, Token),
     Prefix(Token),
     Infix(Token),
+    Op(Operator, Expression),
 }
 
 impl Display for ParserError {
@@ -39,13 +40,14 @@ impl Display for ParserError {
             }
             ParserError::Prefix(token) => write!(f, "No prefix version of '{:?}' exists", token),
             ParserError::Infix(token) => write!(f, "No infix version of '{:?}' exists", token),
+            ParserError::Op(op, expr) => write!(f, "Cannot parse {:?} from {:?}", op, expr)
         }
     }
 }
 
 impl std::error::Error for ParserError {}
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum EvalError {
     ParseInt(ParseIntError),
     ParseFloat(ParseFloatError),

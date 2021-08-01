@@ -144,6 +144,13 @@ fn expect(buffer: &Buffer<Token>, expected: &Token) -> Result<(), ParserError> {
     }
 }
 
+fn is_identifier(token: &Token) -> bool {
+    match token {
+        Token::Identifier(_) => true,
+        _ => false
+    }
+}
+
 trait PrefixParser {
     fn parse(&mut self, token: &Token, buffer: &Buffer<Token>) -> Result<Expression, ParserError>;
 }
@@ -202,7 +209,8 @@ impl InfixParser for Operator {
             | Operator::Gt
             | Operator::Gte
             | Operator::Eq
-            | Operator::Ne => {
+            | Operator::Ne
+            | Operator::Bind => {
                 let rhs = parse_expression(buffer, self.rank())?;
                 Ok(Expression::Infix(
                     Box::new(lhs),
@@ -230,6 +238,7 @@ fn get_infix_parser(token: &Token) -> Option<impl InfixParser> {
         Token::Operator(NE) => Some(Operator::Ne),
         Token::Operator(AND) => Some(Operator::And),
         Token::Operator(OR) => Some(Operator::Or),
+        Token::Operator(BIND) => Some(Operator::Bind),
         _ => None,
     }
 }
@@ -270,7 +279,6 @@ fn parse_expression(buffer: &Buffer<Token>, rank: usize) -> Result<Expression, P
 
     while let Token::Operator(_) = peek(buffer)? {
         let token = peek(buffer)?;
-        dbg!(token); // TODO FIXME infinite loop on "a = b" (invalid expression)
         if let Some(mut op) = get_infix_parser(token) {
             if rank < op.rank() {
                 let _ = next(buffer)?;
@@ -285,24 +293,19 @@ fn parse_expression(buffer: &Buffer<Token>, rank: usize) -> Result<Expression, P
 }
 
 fn parse_let_statement(buffer: &Buffer<Token>) -> Result<Statement, ParserError> {
-    let token = next(buffer)?;
-    let id = if let Token::Identifier(id) = token {
-        id.to_owned()
-    } else {
-        return Err(ParserError::Token(
-            Token::Identifier("*".to_string()),
-            token.clone(),
-        ));
-    };
-
-    let eq = next(buffer)?;
-    if eq != &Token::Operator(BIND) {
-        return Err(ParserError::Token(Token::Operator(BIND), token.clone()));
+    let token = peek(buffer)?;
+    if !is_identifier(token) {
+        return Err(ParserError::Token(Token::Identifier("*".to_string()), token.clone()))
     }
-
-    let expr = parse_expression(buffer, Operator::MIN_RANK)?;
-    expect(buffer, &Token::Delimiter(';'))?;
-    Ok(Statement::Let(id, expr))
+    match parse_expression(buffer, Operator::MIN_RANK)? {
+        Expression::Infix(lhs, Operator::Bind, rhs) =>
+            match *lhs {
+                Expression::Var(name) =>
+                    Ok(Statement::Let(name, *rhs)),
+                lhs => Err(ParserError::Op(Operator::Bind, lhs))
+            }
+        expr => Err(ParserError::Op(Operator::Bind, expr))
+    }
 }
 
 fn parse_if_expression(buffer: &Buffer<Token>) -> Result<Expression, ParserError> {
@@ -438,10 +441,9 @@ mod tests {
             ),
             (
                 "let abc;",
-                Err(ParserError::Token(
-                    Token::Operator(BIND),
-                    Token::Identifier("abc".to_string()),
-                )),
+                Err(ParserError::Op(
+                    Operator::Bind,
+                    Expression::Var("abc".to_string()))),
             ),
             (
                 "let x =",
@@ -603,7 +605,7 @@ mod tests {
             let buf = Buffer::new(tokens);
             let parsed = parse(&buf);
 
-            assert_eq!(parsed, expected);
+            assert_eq!(parsed, expected, "{}", src);
         }
     }
 
@@ -804,11 +806,14 @@ mod tests {
                     )),
                 )),
             ),
-            // TODO FIXME
-            // (
-            //     "a = b",
-            //     Ok(Expression::Unit),
-            // )
+            (
+                "a = b",
+                Ok(Expression::Infix(
+                    Box::new(Expression::Var("a".to_string())),
+                    Operator::Bind,
+                    Box::new(Expression::Var("b".to_string())),
+                )),
+            )
         ];
 
         for (src, expected) in tests {
