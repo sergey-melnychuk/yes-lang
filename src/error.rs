@@ -1,6 +1,7 @@
-use crate::token::Token;
 use std::fmt::{Display, Formatter};
 use std::num::{ParseIntError, ParseFloatError};
+
+use crate::token::Token;
 use crate::parser::{Operator, Expression};
 use crate::eval::Object;
 
@@ -57,7 +58,8 @@ pub(crate) enum EvalError {
     NotBoolean(Object),
     NotFunction(String),
     Apply(Expression),
-    ApplyArgsCount(usize, usize)
+    ApplyArgsCount(usize, usize),
+    InvalidLiteral(String),
 }
 
 impl Display for EvalError {
@@ -70,9 +72,9 @@ impl Display for EvalError {
             EvalError::NotFound(name) =>
                 write!(f, "Not found: '{}'", name),
             EvalError::InfixOp(op, lhs, rhs) =>
-                write!(f, "Cannot apply: '{:?}' {:?} '{:?}'", op, lhs, rhs),
+                write!(f, "Cannot apply: ({:?}, {:?}, {:?})", op, lhs, rhs),
             EvalError::PrefixOp(op, obj) =>
-                write!(f, "Cannot apply: {:?} '{:?}'", op, obj),
+                write!(f, "Cannot apply: ({:?}, {:?})", op, obj),
             EvalError::NotBoolean(obj) =>
                 write!(f, "Expected boolean but got '{}'", obj),
             EvalError::NotFunction(obj) =>
@@ -80,7 +82,9 @@ impl Display for EvalError {
             EvalError::Apply(expr) =>
                 write!(f, "Cannot apply: '{:?}'", expr),
             EvalError::ApplyArgsCount(exp, got) =>
-                write!(f, "Cannot apply: expected {} arguments but got {}", exp, got)
+                write!(f, "Cannot apply: expected number of arguments: {}, got: {}", exp, got),
+            EvalError::InvalidLiteral(lit) =>
+                write!(f, "Invalid literal: '{}'", lit)
         }
     }
 }
@@ -109,7 +113,7 @@ impl From<ParseFloatError> for EvalError {
 
 #[derive(Debug)]
 pub(crate) enum Error {
-    Token(TokenError),
+    Lexer(TokenError),
     Parser(ParserError),
     Eval(EvalError),
 }
@@ -117,7 +121,7 @@ pub(crate) enum Error {
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::Token(e) => write!(f, "{}", e),
+            Error::Lexer(e) => write!(f, "{}", e),
             Error::Parser(e) => write!(f, "{}", e),
             Error::Eval(e) => write!(f, "{}", e),
         }
@@ -128,7 +132,7 @@ impl std::error::Error for Error {}
 
 impl From<TokenError> for Error {
     fn from(e: TokenError) -> Self {
-        Self::Token(e)
+        Self::Lexer(e)
     }
 }
 

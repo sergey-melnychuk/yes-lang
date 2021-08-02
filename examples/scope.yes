@@ -1,0 +1,14 @@
+let x = 1;
+
+fn f(a) {
+    // x is captured here
+    return a + x;
+}
+
+fn g() {
+    // this x does not override x in f
+    let x = f(1);
+    return f(1);
+}
+
+g()

@@ -80,6 +80,7 @@ pub(crate) fn parse(buffer: &Buffer<Token>) -> Result<Vec<Statement>, ParserErro
 
         if token == &Token::Keyword(LET) {
             let stmt = parse_let_statement(buffer)?;
+            expect(buffer, &Token::Delimiter(';'))?;
             result.push(stmt);
         } else if token == &Token::Keyword(RETURN) {
             let expr = parse_expression(buffer, Operator::MIN_RANK)?;
@@ -92,8 +93,14 @@ pub(crate) fn parse(buffer: &Buffer<Token>) -> Result<Vec<Statement>, ParserErro
                 result.push(stmt);
             }
         } else if token == &Token::Keyword(FN) {
-            let stmt = parse_fn_definition(buffer)?;
-            result.push(stmt);
+            if let &Token::Identifier(_) = peek(buffer)? {
+                let stmt = parse_fn_definition(buffer)?;
+                result.push(stmt);
+            } else {
+                let expr = parse_fn_expression(buffer)?;
+                let stmt = Statement::Expr(expr);
+                result.push(stmt);
+            }
         } else if token == &Token::Delimiter('(') {
             let expr = parse_expression(buffer, Operator::MIN_RANK)?;
             expect(buffer, &Token::Delimiter(')'))?;
@@ -273,6 +280,10 @@ fn parse_expression(buffer: &Buffer<Token>, rank: usize) -> Result<Expression, P
         } else {
             expr
         }
+    } else if let Token::Keyword(TRUE) = token {
+        Expression::Lit(TRUE.to_string())
+    } else if let Token::Keyword(FALSE) = token {
+        Expression::Lit(FALSE.to_string())
     } else {
         return Err(ParserError::Token(Token::Keyword("*"), token.clone()));
     };
@@ -395,26 +406,30 @@ fn parse_fn_application(
     func: Expression,
     buffer: &Buffer<Token>,
 ) -> Result<Expression, ParserError> {
-    expect(buffer, &Token::Delimiter('('))?;
-    let mut args = Vec::new();
-    loop {
-        let token = peek(buffer)?;
-        if token == &Token::Delimiter(')') {
-            break;
+    let mut expr = func;
+    while let &Token::Delimiter('(') = peek(buffer)? {
+        expect(buffer, &Token::Delimiter('('))?;
+        let mut args = Vec::new();
+        loop {
+            let token = peek(buffer)?;
+            if token == &Token::Delimiter(')') {
+                break;
+            }
+            let arg = parse_expression(buffer, Operator::MIN_RANK)?;
+            args.push(arg);
+            let token = peek(buffer)?;
+            if token == &Token::Delimiter(',') {
+                let _ = next(buffer)?;
+                continue;
+            }
+            if token == &Token::Delimiter(')') {
+                break;
+            }
         }
-        let arg = parse_expression(buffer, Operator::MIN_RANK)?;
-        args.push(arg);
-        let token = peek(buffer)?;
-        if token == &Token::Delimiter(',') {
-            let _ = next(buffer)?;
-            continue;
-        }
-        if token == &Token::Delimiter(')') {
-            break;
-        }
+        expect(buffer, &Token::Delimiter(')'))?;
+        expr = Expression::Apply(Box::new(expr), args);
     }
-    expect(buffer, &Token::Delimiter(')'))?;
-    Ok(Expression::Apply(Box::new(func), args))
+    Ok(expr)
 }
 
 #[cfg(test)]
@@ -597,6 +612,28 @@ mod tests {
                     Operator::Add,
                     Box::new(Expression::Var("y".to_string())),
                 ))])
+            ),
+            (
+                "let f = fn(a, b) { a + b }",
+                Err(ParserError::Token(Token::Delimiter(';'), Token::EOF)),
+            ),
+            (
+                "fn g(a) { return fn(b) { f(a,b) }; }",
+                Ok(vec![
+                    Statement::Fn(
+                        "g".to_string(),
+                        vec!["a".to_string()],
+                        vec![Statement::Ret(
+                            Expression::Fn(
+                                vec!["b".to_string()],
+                                vec![
+                                    Statement::Expr(
+                                        Expression::Apply(
+                                            Box::new(Expression::Var("f".to_string())),
+                                            vec![
+                                                Expression::Var("a".to_string()),
+                                                Expression::Var("b".to_string())]))]))])
+                ]),
             ),
         ];
 
@@ -813,7 +850,23 @@ mod tests {
                     Operator::Bind,
                     Box::new(Expression::Var("b".to_string())),
                 )),
-            )
+            ),
+            (
+                "x == true",
+                Ok(Expression::Infix(
+                    Box::new(Expression::Var("x".to_string())),
+                    Operator::Eq,
+                    Box::new(Expression::Lit("true".to_string())),
+                ))
+            ),
+            (
+                "x == false",
+                Ok(Expression::Infix(
+                    Box::new(Expression::Var("x".to_string())),
+                    Operator::Eq,
+                    Box::new(Expression::Lit("false".to_string())),
+                ))
+            ),
         ];
 
         for (src, expected) in tests {

@@ -1,0 +1,15 @@
+fn f(a, b) {
+  a + b
+}
+
+fn g(a) {
+  fn(b) {
+    // 'a' is captured here
+    f(a, b)
+  }
+}
+
+let a = 42; // does not override anything
+let h = g(5);
+
+g(1)(2) == h(-2)

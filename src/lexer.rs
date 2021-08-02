@@ -23,11 +23,24 @@ fn match_operator(next: char, peek: Option<char>) -> Result<Token, TokenError> {
     }
 }
 
-fn match_id_or_literal(this: &mut String, tokens: &mut Vec<Token>) {
+fn match_this(this: &mut String, tokens: &mut Vec<Token>) {
     if this.is_empty() {
         return;
     }
-    if is_identifier(&this) {
+    if is_keyword(&this) {
+        let token = match this.as_ref() {
+            LET => Token::Keyword(LET),
+            IF => Token::Keyword(IF),
+            ELSE => Token::Keyword(ELSE),
+            RETURN => Token::Keyword(RETURN),
+            FN => Token::Keyword(FN),
+            TRUE => Token::Keyword(TRUE),
+            FALSE => Token::Keyword(FALSE),
+            _ => unreachable!()
+        };
+        tokens.push(token);
+        this.clear();
+    } else if is_identifier(&this) {
         let token = Token::Identifier(this.to_string());
         tokens.push(token);
         this.clear();
@@ -47,29 +60,47 @@ pub(crate) fn tokenize<I: Iterable<char>>(buf: &I) -> Result<Vec<Token>, TokenEr
             if let Some(chr) = buf.next() {
                 chr
             } else {
-                match_id_or_literal(&mut this, &mut tokens);
+                match_this(&mut this, &mut tokens);
                 tokens.push(Token::EOF);
                 break;
             }
         };
 
-        if next.is_whitespace() || is_delimiter(next) || is_operator(next) {
-            if is_keyword(&this) {
-                let token = match this.as_ref() {
-                    LET => Token::Keyword(LET),
-                    IF => Token::Keyword(IF),
-                    ELSE => Token::Keyword(ELSE),
-                    RETURN => Token::Keyword(RETURN),
-                    FN => Token::Keyword(FN),
-                    TRUE => Token::Keyword(TRUE),
-                    FALSE => Token::Keyword(FALSE),
-                    unexpected => return Err(TokenError::Unexpected(unexpected.to_string())),
-                };
-                tokens.push(token);
-                this.clear();
+        // match quoted string literals
+        if next == '"' {
+            this.push(next);
+            while let Some(c) = buf.next() {
+                this.push(*c);
+                if *c == '"' {
+                    break;
+                }
             }
+            continue;
+        }
 
-            match_id_or_literal(&mut this, &mut tokens);
+        // match single-line comment from '//' to the line break
+        if next == '/' && buf.peek() == Some(&'/') {
+            while let Some(c) = buf.next() {
+                if *c == '\n' {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        // match multi-line comment from '//' to the end of line
+        if next == '/' && buf.peek() == Some(&'*') {
+            while let Some(c) = buf.next() {
+                if *c == '*' && buf.peek() == Some(&'/') {
+                    let _ = buf.next();
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if next.is_whitespace() || is_delimiter(next) || is_operator(next) {
+            match_this(&mut this, &mut tokens);
         } else {
             this.push(next);
         }
@@ -198,14 +229,34 @@ mod tests {
                     Token::EOF,
                 ],
             ),
-            // TODO fix tokenization of quoted string literals
-            // (
-            //     "\"hello \"",
-            //     vec![
-            //         Token::Literal("\"hello \"".to_string()),
-            //         Token::EOF,
-            //     ]
-            // )
+            (
+                "\"hello \"",
+                vec![
+                    Token::Literal("\"hello \"".to_string()),
+                    Token::EOF,
+                ]
+            ),
+            (
+                "abc\"def\"",
+                vec![
+                    Token::Literal("abc\"def\"".to_string()),
+                    Token::EOF,
+                ],
+            ),
+            (
+                "true",
+                vec![
+                    Token::Keyword(TRUE),
+                    Token::EOF,
+                ]
+            ),
+            (
+                "let",
+                vec![
+                    Token::Keyword(LET),
+                    Token::EOF,
+                ]
+            ),
         ];
 
         for (code, expected) in tests {

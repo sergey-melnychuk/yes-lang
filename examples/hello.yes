@@ -1,0 +1,9 @@
+let hi = fn(name) { "hello " + name }; // single line comment
+
+/*
+multi
+line
+comment
+*/
+
+hi("world")
