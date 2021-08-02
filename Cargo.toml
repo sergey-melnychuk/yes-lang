@@ -1,7 +1,12 @@
 [package]
-name = "building-a-compiler"
+name = "yes-lang"
 version = "0.1.0"
 edition = "2018"
+authors = ["sergey-melnychuk"]
+description = "Yet anothEr Scripting Language"
+license = "MIT"
+homepage = "https://github.com/sergey-melnychuk/yes-lang"
+repository = "https://github.com/sergey-melnychuk/yes-lang"
+documentation = "https://github.com/sergey-melnychuk/yes-lang"
 
 [dependencies]
-
