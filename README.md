@@ -36,12 +36,14 @@ Non-goals:
 $ cargo run
 [...]
 REPL: enter :q to quit.
-> let hi = fn(name) { "hello " + name };
-[AST]
+> let f = (fn (x) { fn(y) { x + y } });
+<function>
+> let hi = f("hello ");
 <function>
 > hi("world")
-[AST]
 hello world
+> f(40)(2)
+42
 > :q
 $
 ```
@@ -66,8 +68,9 @@ fn fib(n) {
     }
 }
 
-fib(42) == 267914296 && fib(84) == 160500643816367088
-
+fib(42) == 267914296
+&& fib(84) == 160500643816367088
+&& fib(92) == 7540113804746346429
 ```
 
 ```shell
