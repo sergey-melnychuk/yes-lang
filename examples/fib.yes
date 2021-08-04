@@ -15,6 +15,5 @@ fn fib(n) {
 
 fib(42) == 267914296
 && fib(84) == 160500643816367088
-// overflows stack in debug mode, works in release mode
-//&& fib(92) == 7540113804746346429
+&& fib(92) == 7540113804746346429
 // fib(93) overflows i64
