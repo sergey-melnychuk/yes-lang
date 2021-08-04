@@ -466,7 +466,7 @@ mod tests {
         ];
 
         for test in tests {
-            let code = get_file(base.join(test).to_str().unwrap()).unwrap();
+            let code = get_file(base.join(test).as_path()).unwrap();
             let result = run_file(&code).unwrap();
 
             assert_eq!(result, Object::Bool(true));
