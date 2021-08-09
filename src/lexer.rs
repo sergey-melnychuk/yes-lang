@@ -36,7 +36,7 @@ fn match_this(this: &mut String, tokens: &mut Vec<Token>) {
             FN => Token::Keyword(FN),
             TRUE => Token::Keyword(TRUE),
             FALSE => Token::Keyword(FALSE),
-            _ => unreachable!()
+            _ => unreachable!(),
         };
         tokens.push(token);
         this.clear();
@@ -231,32 +231,14 @@ mod tests {
             ),
             (
                 "\"hello \"",
-                vec![
-                    Token::Literal("\"hello \"".to_string()),
-                    Token::EOF,
-                ]
+                vec![Token::Literal("\"hello \"".to_string()), Token::EOF],
             ),
             (
                 "abc\"def\"",
-                vec![
-                    Token::Literal("abc\"def\"".to_string()),
-                    Token::EOF,
-                ],
+                vec![Token::Literal("abc\"def\"".to_string()), Token::EOF],
             ),
-            (
-                "true",
-                vec![
-                    Token::Keyword(TRUE),
-                    Token::EOF,
-                ]
-            ),
-            (
-                "let",
-                vec![
-                    Token::Keyword(LET),
-                    Token::EOF,
-                ]
-            ),
+            ("true", vec![Token::Keyword(TRUE), Token::EOF]),
+            ("let", vec![Token::Keyword(LET), Token::EOF]),
         ];
 
         for (code, expected) in tests {

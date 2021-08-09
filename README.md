@@ -30,6 +30,22 @@ Non-goals:
 - production-readiness
 - usability in general
 
+#### Build
+
+`cargo build --release`
+
+`cargo test --release`
+
+### Run
+
+Example: [fib.yes](examples/fib.yes).
+
+```shell
+$ cargo run --release examples/fib.yes
+[...]
+true
+```
+
 ### REPL
 
 ```shell
@@ -44,37 +60,10 @@ REPL: enter :q to quit.
 hello world
 > f(40)(2)
 42
+> :load examples/fib.yes
+true
+> fib(10)
+55
 > :q
 $
-```
-
-### Run
-
-```rust
-// examples/fib.yes
-
-fn fib1(n, a, b) {
-    if n == 0 { a+b }
-    else { fib1(n-1, a+b, a) }
-}
-
-fn fib(n) {
-    if n <= 0 { 0 }
-    else {
-        if n <= 2 { 1 }
-        else {
-            fib1(n-2, 1, 0)
-        }
-    }
-}
-
-fib(42) == 267914296
-&& fib(84) == 160500643816367088
-&& fib(92) == 7540113804746346429
-```
-
-```shell
-$ cargo run examples/fib.yes
-[...]
-true
 ```

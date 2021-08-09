@@ -1,9 +1,9 @@
 use std::fmt::{Display, Formatter};
-use std::num::{ParseIntError, ParseFloatError};
+use std::num::{ParseFloatError, ParseIntError};
 
-use crate::token::Token;
-use crate::parser::{Operator, Expression};
 use crate::eval::Object;
+use crate::parser::{Expression, Operator};
+use crate::token::Token;
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -41,7 +41,7 @@ impl Display for ParserError {
             }
             ParserError::Prefix(token) => write!(f, "No prefix version of '{:?}' exists", token),
             ParserError::Infix(token) => write!(f, "No infix version of '{:?}' exists", token),
-            ParserError::Op(op, expr) => write!(f, "Cannot parse {:?} from {:?}", op, expr)
+            ParserError::Op(op, expr) => write!(f, "Cannot parse {:?} from {:?}", op, expr),
         }
     }
 }
@@ -65,26 +65,22 @@ pub(crate) enum EvalError {
 impl Display for EvalError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            EvalError::ParseInt(e) =>
-                write!(f, "Parsing integer failed: {}", e),
-            EvalError::ParseFloat(e) =>
-                write!(f, "Parsing float failed: {}", e),
-            EvalError::NotFound(name) =>
-                write!(f, "Not found: '{}'", name),
-            EvalError::InfixOp(op, lhs, rhs) =>
-                write!(f, "Cannot apply: ({:?}, {:?}, {:?})", op, lhs, rhs),
-            EvalError::PrefixOp(op, obj) =>
-                write!(f, "Cannot apply: ({:?}, {:?})", op, obj),
-            EvalError::NotBoolean(obj) =>
-                write!(f, "Expected boolean but got '{}'", obj),
-            EvalError::NotFunction(obj) =>
-                write!(f, "'{}' is not a function", obj),
-            EvalError::Apply(expr) =>
-                write!(f, "Cannot apply: '{:?}'", expr),
-            EvalError::ApplyArgsCount(exp, got) =>
-                write!(f, "Cannot apply: expected number of arguments: {}, got: {}", exp, got),
-            EvalError::InvalidLiteral(lit) =>
-                write!(f, "Invalid literal: '{}'", lit)
+            EvalError::ParseInt(e) => write!(f, "Parsing integer failed: {}", e),
+            EvalError::ParseFloat(e) => write!(f, "Parsing float failed: {}", e),
+            EvalError::NotFound(name) => write!(f, "Not found: '{}'", name),
+            EvalError::InfixOp(op, lhs, rhs) => {
+                write!(f, "Cannot apply: ({:?}, {:?}, {:?})", op, lhs, rhs)
+            }
+            EvalError::PrefixOp(op, obj) => write!(f, "Cannot apply: ({:?}, {:?})", op, obj),
+            EvalError::NotBoolean(obj) => write!(f, "Expected boolean but got '{}'", obj),
+            EvalError::NotFunction(obj) => write!(f, "'{}' is not a function", obj),
+            EvalError::Apply(expr) => write!(f, "Cannot apply: '{:?}'", expr),
+            EvalError::ApplyArgsCount(exp, got) => write!(
+                f,
+                "Cannot apply: expected number of arguments: {}, got: {}",
+                exp, got
+            ),
+            EvalError::InvalidLiteral(lit) => write!(f, "Invalid literal: '{}'", lit),
         }
     }
 }
@@ -94,7 +90,7 @@ impl std::error::Error for EvalError {
         match self {
             EvalError::ParseInt(e) => Some(e),
             EvalError::ParseFloat(e) => Some(e),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -116,6 +112,7 @@ pub(crate) enum Error {
     Lexer(TokenError),
     Parser(ParserError),
     Eval(EvalError),
+    IO(std::io::Error),
 }
 
 impl Display for Error {
@@ -124,6 +121,7 @@ impl Display for Error {
             Error::Lexer(e) => write!(f, "{}", e),
             Error::Parser(e) => write!(f, "{}", e),
             Error::Eval(e) => write!(f, "{}", e),
+            Error::IO(e) => write!(f, "{}", e),
         }
     }
 }
@@ -145,5 +143,11 @@ impl From<ParserError> for Error {
 impl From<EvalError> for Error {
     fn from(e: EvalError) -> Self {
         Self::Eval(e)
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Self::IO(e)
     }
 }

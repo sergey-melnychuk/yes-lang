@@ -21,7 +21,6 @@ pub(crate) enum Operator {
     Or,
     And,
     Bind,
-    Call(String),
 }
 
 impl Operator {
@@ -29,7 +28,6 @@ impl Operator {
 
     pub(crate) fn rank(&self) -> usize {
         match self {
-            Operator::Call(_) => 8,
             Operator::Not | Operator::Neg => 7,
             Operator::Mul | Operator::Div | Operator::Mod => 6,
             Operator::Add | Operator::Sub => 5,
@@ -45,7 +43,7 @@ impl Operator {
 pub(crate) enum Statement {
     Let(String, Expression),
     Ret(Expression),
-    If(Expression, Expression, Expression),
+    If(Expression, Vec<Statement>, Vec<Statement>),
     Fn(String, Vec<String>, Vec<Statement>),
     Call(Box<Expression>, Vec<Expression>),
     Expr(Expression),
@@ -53,10 +51,8 @@ pub(crate) enum Statement {
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub(crate) enum Expression {
-    Unit,
     Var(String),
     Lit(String),
-    If(Box<Expression>, Box<Expression>, Box<Expression>),
     Fn(Vec<String>, Vec<Statement>),
     Apply(Box<Expression>, Vec<Expression>),
     Prefix(Operator, Box<Expression>),
@@ -88,10 +84,8 @@ pub(crate) fn parse(buffer: &Buffer<Token>) -> Result<Vec<Statement>, ParserErro
             let stmt = Statement::Ret(expr);
             result.push(stmt);
         } else if token == &Token::Keyword(IF) {
-            if let Expression::If(cond, if_clause, else_clause) = parse_if_expression(buffer)? {
-                let stmt = Statement::If(*cond, *if_clause, *else_clause);
-                result.push(stmt);
-            }
+            let stmt = parse_if_statement(buffer)?;
+            result.push(stmt);
         } else if token == &Token::Keyword(FN) {
             if let &Token::Identifier(_) = peek(buffer)? {
                 let stmt = parse_fn_definition(buffer)?;
@@ -154,7 +148,7 @@ fn expect(buffer: &Buffer<Token>, expected: &Token) -> Result<(), ParserError> {
 fn is_identifier(token: &Token) -> bool {
     match token {
         Token::Identifier(_) => true,
-        _ => false
+        _ => false,
     }
 }
 
@@ -269,8 +263,6 @@ fn parse_expression(buffer: &Buffer<Token>, rank: usize) -> Result<Expression, P
         }
     } else if let Token::Keyword(FN) = token {
         parse_fn_expression(buffer)?
-    } else if let Token::Keyword(IF) = token {
-        parse_if_expression(buffer)?
     } else if let Token::Delimiter('(') = token {
         let is_fn = peek(buffer)? == &Token::Keyword(FN);
         let expr = parse_expression(buffer, Operator::MIN_RANK)?;
@@ -306,38 +298,35 @@ fn parse_expression(buffer: &Buffer<Token>, rank: usize) -> Result<Expression, P
 fn parse_let_statement(buffer: &Buffer<Token>) -> Result<Statement, ParserError> {
     let token = peek(buffer)?;
     if !is_identifier(token) {
-        return Err(ParserError::Token(Token::Identifier("*".to_string()), token.clone()))
+        return Err(ParserError::Token(
+            Token::Identifier("*".to_string()),
+            token.clone(),
+        ));
     }
     match parse_expression(buffer, Operator::MIN_RANK)? {
-        Expression::Infix(lhs, Operator::Bind, rhs) =>
-            match *lhs {
-                Expression::Var(name) =>
-                    Ok(Statement::Let(name, *rhs)),
-                lhs => Err(ParserError::Op(Operator::Bind, lhs))
-            }
-        expr => Err(ParserError::Op(Operator::Bind, expr))
+        Expression::Infix(lhs, Operator::Bind, rhs) => match *lhs {
+            Expression::Var(name) => Ok(Statement::Let(name, *rhs)),
+            lhs => Err(ParserError::Op(Operator::Bind, lhs)),
+        },
+        expr => Err(ParserError::Op(Operator::Bind, expr)),
     }
 }
 
-fn parse_if_expression(buffer: &Buffer<Token>) -> Result<Expression, ParserError> {
-    let cond = parse_expression(&buffer, Operator::MIN_RANK)?;
+fn parse_if_statement(buffer: &Buffer<Token>) -> Result<Statement, ParserError> {
+    let cond = parse_expression(buffer, Operator::MIN_RANK)?;
     expect(buffer, &Token::Delimiter('{'))?;
-    let if_clause = parse_expression(&buffer, Operator::MIN_RANK)?;
+    let if_clause = parse(buffer)?;
     expect(buffer, &Token::Delimiter('}'))?;
     let else_clause = if peek(buffer)? == &Token::Keyword(ELSE) {
         let _ = next(buffer)?;
         expect(buffer, &Token::Delimiter('{'))?;
-        let expr = parse_expression(&buffer, Operator::MIN_RANK)?;
+        let block = parse(buffer)?;
         expect(buffer, &Token::Delimiter('}'))?;
-        expr
+        block
     } else {
-        Expression::Unit
+        vec![]
     };
-    Ok(Expression::If(
-        Box::new(cond),
-        Box::new(if_clause),
-        Box::new(else_clause),
-    ))
+    Ok(Statement::If(cond, if_clause, else_clause))
 }
 
 fn parse_fn_definition(buffer: &Buffer<Token>) -> Result<Statement, ParserError> {
@@ -458,7 +447,8 @@ mod tests {
                 "let abc;",
                 Err(ParserError::Op(
                     Operator::Bind,
-                    Expression::Var("abc".to_string()))),
+                    Expression::Var("abc".to_string()),
+                )),
             ),
             (
                 "let x =",
@@ -589,6 +579,59 @@ mod tests {
                 )]),
             ),
             (
+                "if a == 0 { x + 1 } else { y - 2 }",
+                Ok(vec![Statement::If(
+                    Expression::Infix(
+                        Box::new(Expression::Var("a".to_string())),
+                        Operator::Eq,
+                        Box::new(Expression::Lit("0".to_string())),
+                    ),
+                    vec![Statement::Expr(Expression::Infix(
+                        Box::new(Expression::Var("x".to_string())),
+                        Operator::Add,
+                        Box::new(Expression::Lit("1".to_string()))),
+                    )],
+                    vec![Statement::Expr(Expression::Infix(
+                        Box::new(Expression::Var("y".to_string())),
+                        Operator::Sub,
+                        Box::new(Expression::Lit("2".to_string()))),
+                    )]
+                )]),
+            ),
+            (
+                "if a { f(x) } else { g(y) }",
+                Ok(vec![Statement::If(
+                    Expression::Var("a".to_string()),
+                    vec![Statement::Expr(Expression::Apply(
+                        Box::new(Expression::Var("f".to_string())),
+                        vec![Expression::Var("x".to_string())],
+                    ))],
+                    vec![Statement::Expr(Expression::Apply(
+                        Box::new(Expression::Var("g".to_string())),
+                        vec![Expression::Var("y".to_string())],
+                    ))],
+                )])
+            ),
+            (
+                "if x == 0 { let y = x * 2; return y; }",
+                Ok(vec![Statement::If(
+                    Expression::Infix(
+                        Box::new(Expression::Var("x".to_string())),
+                        Operator::Eq,
+                        Box::new(Expression::Lit("0".to_string())),
+                    ),
+                    vec![
+                        Statement::Let("y".to_string(), Expression::Infix(
+                            Box::new(Expression::Var("x".to_string())),
+                            Operator::Mul,
+                            Box::new(Expression::Lit("2".to_string()))
+                        )),
+                        Statement::Ret(Expression::Var("y".to_string())),
+                    ],
+                    vec![],
+                )])
+            ),
+            (
                 "(fn(a,b) {return a+b;})(1,2);",
                 Ok(vec![Statement::Call(
                     Box::new(Expression::Fn(
@@ -611,7 +654,7 @@ mod tests {
                     Box::new(Expression::Var("x".to_string())),
                     Operator::Add,
                     Box::new(Expression::Var("y".to_string())),
-                ))])
+                ))]),
             ),
             (
                 "let f = fn(a, b) { a + b }",
@@ -619,21 +662,20 @@ mod tests {
             ),
             (
                 "fn g(a) { return fn(b) { f(a,b) }; }",
-                Ok(vec![
-                    Statement::Fn(
-                        "g".to_string(),
-                        vec!["a".to_string()],
-                        vec![Statement::Ret(
-                            Expression::Fn(
-                                vec!["b".to_string()],
-                                vec![
-                                    Statement::Expr(
-                                        Expression::Apply(
-                                            Box::new(Expression::Var("f".to_string())),
-                                            vec![
-                                                Expression::Var("a".to_string()),
-                                                Expression::Var("b".to_string())]))]))])
-                ]),
+                Ok(vec![Statement::Fn(
+                    "g".to_string(),
+                    vec!["a".to_string()],
+                    vec![Statement::Ret(Expression::Fn(
+                        vec!["b".to_string()],
+                        vec![Statement::Expr(Expression::Apply(
+                            Box::new(Expression::Var("f".to_string())),
+                            vec![
+                                Expression::Var("a".to_string()),
+                                Expression::Var("b".to_string()),
+                            ],
+                        ))],
+                    ))],
+                )]),
             ),
         ];
 
@@ -810,40 +852,6 @@ mod tests {
                 )),
             ),
             (
-                "if a == 0 { x + 1 } else { y - 2 }",
-                Ok(Expression::If(
-                    Box::new(Expression::Infix(
-                        Box::new(Expression::Var("a".to_string())),
-                        Operator::Eq,
-                        Box::new(Expression::Lit("0".to_string())),
-                    )),
-                    Box::new(Expression::Infix(
-                        Box::new(Expression::Var("x".to_string())),
-                        Operator::Add,
-                        Box::new(Expression::Lit("1".to_string())),
-                    )),
-                    Box::new(Expression::Infix(
-                        Box::new(Expression::Var("y".to_string())),
-                        Operator::Sub,
-                        Box::new(Expression::Lit("2".to_string())),
-                    )),
-                )),
-            ),
-            (
-                "if a { f(x) } else { g(y) }",
-                Ok(Expression::If(
-                    Box::new(Expression::Var("a".to_string())),
-                    Box::new(Expression::Apply(
-                        Box::new(Expression::Var("f".to_string())),
-                        vec![Expression::Var("x".to_string())],
-                    )),
-                    Box::new(Expression::Apply(
-                        Box::new(Expression::Var("g".to_string())),
-                        vec![Expression::Var("y".to_string())],
-                    )),
-                )),
-            ),
-            (
                 "a = b",
                 Ok(Expression::Infix(
                     Box::new(Expression::Var("a".to_string())),
@@ -857,7 +865,7 @@ mod tests {
                     Box::new(Expression::Var("x".to_string())),
                     Operator::Eq,
                     Box::new(Expression::Lit("true".to_string())),
-                ))
+                )),
             ),
             (
                 "x == false",
@@ -865,7 +873,7 @@ mod tests {
                     Box::new(Expression::Var("x".to_string())),
                     Operator::Eq,
                     Box::new(Expression::Lit("false".to_string())),
-                ))
+                )),
             ),
         ];
 
