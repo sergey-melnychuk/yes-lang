@@ -8,14 +8,14 @@ use crate::token::Token;
 #[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum TokenError {
-    EOF,
+    Eof,
     Unexpected(String),
 }
 
 impl Display for TokenError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            TokenError::EOF => write!(f, "Unexpected EOF"),
+            TokenError::Eof => write!(f, "Unexpected EOF"),
             TokenError::Unexpected(c) => write!(f, "Unexpected: '{}'", c),
         }
     }
@@ -25,7 +25,7 @@ impl std::error::Error for TokenError {}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ParserError {
-    EOF,
+    Eof,
     Token(Token, Token),
     Prefix(Token),
     Infix(Token),
@@ -35,7 +35,7 @@ pub(crate) enum ParserError {
 impl Display for ParserError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            ParserError::EOF => write!(f, "Unexpected EOF"),
+            ParserError::Eof => write!(f, "Unexpected EOF"),
             ParserError::Token(expected, got) => {
                 write!(f, "Expected '{:?}' but got '{:?}'", expected, got)
             }
