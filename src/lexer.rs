@@ -27,7 +27,7 @@ fn match_this(this: &mut String, tokens: &mut Vec<Token>) {
     if this.is_empty() {
         return;
     }
-    if is_keyword(&this) {
+    if is_keyword(this) {
         let token = match this.as_ref() {
             LET => Token::Keyword(LET),
             IF => Token::Keyword(IF),
@@ -40,7 +40,7 @@ fn match_this(this: &mut String, tokens: &mut Vec<Token>) {
         };
         tokens.push(token);
         this.clear();
-    } else if is_identifier(&this) {
+    } else if is_identifier(this) {
         let token = Token::Identifier(this.to_string());
         tokens.push(token);
         this.clear();
@@ -61,7 +61,7 @@ pub(crate) fn tokenize<I: Iterable<char>>(buf: &I) -> Result<Vec<Token>, TokenEr
                 chr
             } else {
                 match_this(&mut this, &mut tokens);
-                tokens.push(Token::EOF);
+                tokens.push(Token::End);
                 break;
             }
         };
@@ -138,7 +138,7 @@ mod tests {
                     Token::Operator(BIND),
                     Token::Literal("123".to_string()),
                     Token::Delimiter(';'),
-                    Token::EOF,
+                    Token::End,
                 ],
             ),
             (
@@ -155,7 +155,7 @@ mod tests {
                     Token::Operator(DASH),
                     Token::Identifier("b".to_string()),
                     Token::Delimiter('}'),
-                    Token::EOF,
+                    Token::End,
                 ],
             ),
             (
@@ -183,7 +183,7 @@ mod tests {
                     Token::Literal("3".to_string()),
                     Token::Delimiter(')'),
                     Token::Delimiter(';'),
-                    Token::EOF,
+                    Token::End,
                 ],
             ),
             (
@@ -198,7 +198,7 @@ mod tests {
                     Token::Operator("*"),
                     Token::Literal("2".to_string()),
                     Token::Delimiter('}'),
-                    Token::EOF,
+                    Token::End,
                 ],
             ),
             (
@@ -206,7 +206,7 @@ mod tests {
                 vec![
                     Token::Literal("42".to_string()),
                     Token::Delimiter(';'),
-                    Token::EOF,
+                    Token::End,
                 ],
             ),
             (
@@ -217,7 +217,7 @@ mod tests {
                     Token::Operator(BIND),
                     Token::Literal("\"42\"".to_string()),
                     Token::Delimiter(';'),
-                    Token::EOF,
+                    Token::End,
                 ],
             ),
             (
@@ -226,19 +226,19 @@ mod tests {
                     Token::Identifier("a".to_string()),
                     Token::Operator(LTE),
                     Token::Literal("2".to_string()),
-                    Token::EOF,
+                    Token::End,
                 ],
             ),
             (
                 "\"hello \"",
-                vec![Token::Literal("\"hello \"".to_string()), Token::EOF],
+                vec![Token::Literal("\"hello \"".to_string()), Token::End],
             ),
             (
                 "abc\"def\"",
-                vec![Token::Literal("abc\"def\"".to_string()), Token::EOF],
+                vec![Token::Literal("abc\"def\"".to_string()), Token::End],
             ),
-            ("true", vec![Token::Keyword(TRUE), Token::EOF]),
-            ("let", vec![Token::Keyword(LET), Token::EOF]),
+            ("true", vec![Token::Keyword(TRUE), Token::End]),
+            ("let", vec![Token::Keyword(LET), Token::End]),
         ];
 
         for (code, expected) in tests {

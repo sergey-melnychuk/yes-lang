@@ -5,7 +5,7 @@ pub(crate) enum Token {
     Keyword(&'static str),
     Operator(&'static str),
     Delimiter(char),
-    EOF,
+    End,
 }
 
 impl Token {
@@ -21,29 +21,29 @@ impl Token {
     }
 }
 
-pub(crate) const LET: &'static str = "let";
-pub(crate) const IF: &'static str = "if";
-pub(crate) const ELSE: &'static str = "else";
-pub(crate) const RETURN: &'static str = "return";
-pub(crate) const FN: &'static str = "fn";
-pub(crate) const TRUE: &'static str = "true";
-pub(crate) const FALSE: &'static str = "false";
+pub(crate) const LET: &str = "let";
+pub(crate) const IF: &str = "if";
+pub(crate) const ELSE: &str = "else";
+pub(crate) const RETURN: &str = "return";
+pub(crate) const FN: &str = "fn";
+pub(crate) const TRUE: &str = "true";
+pub(crate) const FALSE: &str = "false";
 
-pub(crate) const PLUS: &'static str = "+";
-pub(crate) const DASH: &'static str = "-";
-pub(crate) const STAR: &'static str = "*";
-pub(crate) const SLASH: &'static str = "/";
-pub(crate) const PERCENT: &'static str = "%";
-pub(crate) const EQ: &'static str = "==";
-pub(crate) const NE: &'static str = "!=";
-pub(crate) const OR: &'static str = "||";
-pub(crate) const AND: &'static str = "&&";
-pub(crate) const BANG: &'static str = "!";
-pub(crate) const LTE: &'static str = "<=";
-pub(crate) const LT: &'static str = "<";
-pub(crate) const GTE: &'static str = ">=";
-pub(crate) const GT: &'static str = ">";
-pub(crate) const BIND: &'static str = "=";
+pub(crate) const PLUS: &str = "+";
+pub(crate) const DASH: &str = "-";
+pub(crate) const STAR: &str = "*";
+pub(crate) const SLASH: &str = "/";
+pub(crate) const PERCENT: &str = "%";
+pub(crate) const EQ: &str = "==";
+pub(crate) const NE: &str = "!=";
+pub(crate) const OR: &str = "||";
+pub(crate) const AND: &str = "&&";
+pub(crate) const BANG: &str = "!";
+pub(crate) const LTE: &str = "<=";
+pub(crate) const LT: &str = "<";
+pub(crate) const GTE: &str = ">=";
+pub(crate) const GT: &str = ">";
+pub(crate) const BIND: &str = "=";
 
 pub(crate) fn is_keyword(token: &str) -> bool {
     token == LET

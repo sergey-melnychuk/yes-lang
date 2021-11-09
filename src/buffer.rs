@@ -37,11 +37,11 @@ impl<T: 'static> Iterable<T> for Buffer<T> {
         if idx < self.0.len() {
             *r += 1;
         }
-        self.0.iter().skip(idx).next()
+        self.0.get(idx)
     }
 
     fn peek(&self) -> Option<&T> {
-        self.0.iter().skip(*self.1.borrow()).next()
+        self.0.get(*self.1.borrow())
     }
 
     fn back(&self) {

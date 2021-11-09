@@ -93,9 +93,10 @@ fn repl(line: String, ctx: &mut Context, debug: bool) -> Result<Object, Error> {
     let tokens = tokenize(&buf)?;
     let buf = Buffer::new(tokens);
     let tree = parse(&buf)?;
+    let obj = eval(&tree, ctx)?;
     if debug {
         println!("{:#?}\n", &tree);
+        println!("{:#?}\n", ctx);
     }
-    let obj = eval(&tree, ctx)?;
     Ok(obj)
 }

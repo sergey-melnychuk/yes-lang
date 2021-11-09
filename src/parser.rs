@@ -64,14 +64,14 @@ pub(crate) fn parse(buffer: &Buffer<Token>) -> Result<Vec<Statement>, ParserErro
 
     loop {
         let token = if let Some(next) = buffer.peek() {
-            if next == &Token::EOF {
+            if next == &Token::End {
                 return Ok(result);
             } else {
                 let _ = buffer.next();
                 next
             }
         } else {
-            return Err(ParserError::EOF);
+            return Err(ParserError::Eof);
         };
 
         if token == &Token::Keyword(LET) {
@@ -121,7 +121,7 @@ fn next(buffer: &Buffer<Token>) -> Result<&Token, ParserError> {
     if let Some(token) = buffer.next() {
         Ok(token)
     } else {
-        Err(ParserError::EOF)
+        Err(ParserError::Eof)
     }
 }
 
@@ -129,7 +129,7 @@ fn peek(buffer: &Buffer<Token>) -> Result<&Token, ParserError> {
     if let Some(token) = buffer.peek() {
         Ok(token)
     } else {
-        Err(ParserError::EOF)
+        Err(ParserError::Eof)
     }
 }
 
@@ -141,15 +141,12 @@ fn expect(buffer: &Buffer<Token>, expected: &Token) -> Result<(), ParserError> {
             Ok(())
         }
     } else {
-        Err(ParserError::EOF)
+        Err(ParserError::Eof)
     }
 }
 
 fn is_identifier(token: &Token) -> bool {
-    match token {
-        Token::Identifier(_) => true,
-        _ => false,
-    }
+    matches!(token, Token::Identifier(_))
 }
 
 trait PrefixParser {
@@ -452,7 +449,7 @@ mod tests {
             ),
             (
                 "let x =",
-                Err(ParserError::Token(Token::Keyword("*"), Token::EOF)),
+                Err(ParserError::Token(Token::Keyword("*"), Token::End)),
             ),
             (
                 "let answer = 42;",
@@ -589,13 +586,13 @@ mod tests {
                     vec![Statement::Expr(Expression::Infix(
                         Box::new(Expression::Var("x".to_string())),
                         Operator::Add,
-                        Box::new(Expression::Lit("1".to_string()))),
-                    )],
+                        Box::new(Expression::Lit("1".to_string())),
+                    ))],
                     vec![Statement::Expr(Expression::Infix(
                         Box::new(Expression::Var("y".to_string())),
                         Operator::Sub,
-                        Box::new(Expression::Lit("2".to_string()))),
-                    )]
+                        Box::new(Expression::Lit("2".to_string())),
+                    ))],
                 )]),
             ),
             (
@@ -610,7 +607,7 @@ mod tests {
                         Box::new(Expression::Var("g".to_string())),
                         vec![Expression::Var("y".to_string())],
                     ))],
-                )])
+                )]),
             ),
             (
                 "if x == 0 { let y = x * 2; return y; }",
@@ -621,15 +618,18 @@ mod tests {
                         Box::new(Expression::Lit("0".to_string())),
                     ),
                     vec![
-                        Statement::Let("y".to_string(), Expression::Infix(
-                            Box::new(Expression::Var("x".to_string())),
-                            Operator::Mul,
-                            Box::new(Expression::Lit("2".to_string()))
-                        )),
+                        Statement::Let(
+                            "y".to_string(),
+                            Expression::Infix(
+                                Box::new(Expression::Var("x".to_string())),
+                                Operator::Mul,
+                                Box::new(Expression::Lit("2".to_string())),
+                            ),
+                        ),
                         Statement::Ret(Expression::Var("y".to_string())),
                     ],
                     vec![],
-                )])
+                )]),
             ),
             (
                 "(fn(a,b) {return a+b;})(1,2);",
@@ -658,7 +658,7 @@ mod tests {
             ),
             (
                 "let f = fn(a, b) { a + b }",
-                Err(ParserError::Token(Token::Delimiter(';'), Token::EOF)),
+                Err(ParserError::Token(Token::Delimiter(';'), Token::End)),
             ),
             (
                 "fn g(a) { return fn(b) { f(a,b) }; }",

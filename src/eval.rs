@@ -30,7 +30,7 @@ impl Display for Object {
 }
 
 fn is_quoted(s: &str) -> bool {
-    s.starts_with("\"") && s.ends_with("\"")
+    s.starts_with('\"') && s.ends_with('\"')
 }
 
 fn unquote(s: &str) -> String {
@@ -53,8 +53,8 @@ fn is_float(s: &str) -> bool {
 
 #[derive(Default, Debug, Clone)]
 pub(crate) struct Context<'a> {
-    parent: Option<&'a Context<'a>>,
     objects: HashMap<String, Object>,
+    parent: Option<&'a Context<'a>>,
 }
 
 impl<'a> Context<'a> {
@@ -84,11 +84,9 @@ impl<'a> Context<'a> {
         if self.objects.is_empty() {
             self.parent.map(|p| p.snapshot()).unwrap_or_default()
         } else {
-            let mut result = Snapshot::default();
-            for (k, v) in self.objects.iter() {
-                result.objects.insert(k.clone(), v.clone());
+            Snapshot {
+                objects: self.objects.clone(),
             }
-            result
         }
     }
 
@@ -109,7 +107,7 @@ pub(crate) struct Snapshot {
 pub(crate) fn eval(statements: &[Statement], ctx: &mut Context) -> Result<Object, EvalError> {
     let mut result = Object::Unit;
     for stmt in statements {
-        result = eval_stmt(&stmt, ctx)?;
+        result = eval_stmt(stmt, ctx)?;
         if let Statement::Ret(_) = stmt {
             break;
         }
@@ -120,15 +118,15 @@ pub(crate) fn eval(statements: &[Statement], ctx: &mut Context) -> Result<Object
 fn eval_stmt(stmt: &Statement, ctx: &mut Context) -> Result<Object, EvalError> {
     match stmt {
         Statement::Let(name, expr) => {
-            let obj = eval_expr(expr, ctx.fork())?;
-            ctx.put(name.clone(), obj.clone());
-            Ok(obj)
+            let obj = eval_expr(expr, ctx)?;
+            ctx.put(name.clone(), obj);
+            Ok(Object::Unit)
         }
 
-        Statement::Ret(expr) => eval_expr(expr, ctx.fork()),
+        Statement::Ret(expr) => eval_expr(expr, ctx),
 
         Statement::If(expr, if_clause, else_clause) => {
-            let cond = eval_expr(expr, ctx.fork())?;
+            let cond = eval_expr(expr, ctx)?;
             match cond {
                 Object::Bool(true) => eval(if_clause, ctx),
                 Object::Bool(false) => eval(else_clause, ctx),
@@ -137,18 +135,19 @@ fn eval_stmt(stmt: &Statement, ctx: &mut Context) -> Result<Object, EvalError> {
         }
 
         Statement::Fn(name, args, body) => {
-            let f = Object::Func(args.to_owned(), body.to_owned(), ctx.snapshot());
-            ctx.put(name.clone(), f.clone());
-            Ok(f)
+            let snapshot = ctx.snapshot(); // TODO Limit snapshot only to variables referenced in the function body?
+            let f = Object::Func(args.to_owned(), body.to_owned(), snapshot);
+            ctx.put(name.clone(), f);
+            Ok(Object::Unit)
         }
 
-        Statement::Call(lhs, rhs) => eval_fn_expr(lhs, rhs, ctx.fork()),
+        Statement::Call(lhs, rhs) => eval_fn_expr(lhs, rhs, ctx),
 
-        Statement::Expr(expr) => eval_expr(expr, ctx.fork()),
+        Statement::Expr(expr) => eval_expr(expr, ctx),
     }
 }
 
-fn eval_expr(expr: &Expression, ctx: Context) -> Result<Object, EvalError> {
+fn eval_expr(expr: &Expression, ctx: &Context) -> Result<Object, EvalError> {
     match expr {
         Expression::Lit(str) if TRUE == str => Ok(Object::Bool(true)),
         Expression::Lit(str) if FALSE == str => Ok(Object::Bool(false)),
@@ -160,13 +159,11 @@ fn eval_expr(expr: &Expression, ctx: Context) -> Result<Object, EvalError> {
         Expression::Var(name) if ctx.has(name) => Ok(ctx.get(name).cloned().unwrap()),
         Expression::Var(name) => Err(EvalError::NotFound(name.to_string())),
 
-        Expression::Prefix(op, rhs) => eval_prefix(op.clone(), eval_expr(rhs, ctx.fork())?),
+        Expression::Prefix(op, rhs) => eval_prefix(op.clone(), eval_expr(rhs, ctx)?),
 
-        Expression::Infix(lhs, op, rhs) => eval_infix(
-            op.clone(),
-            eval_expr(lhs, ctx.fork())?,
-            eval_expr(rhs, ctx.fork())?,
-        ),
+        Expression::Infix(lhs, op, rhs) => {
+            eval_infix(op.clone(), eval_expr(lhs, ctx)?, eval_expr(rhs, ctx)?)
+        }
 
         Expression::Fn(args, body) => Ok(Object::Func(
             args.to_owned(),
@@ -174,7 +171,7 @@ fn eval_expr(expr: &Expression, ctx: Context) -> Result<Object, EvalError> {
             ctx.snapshot(),
         )),
 
-        Expression::Apply(lhs, rhs) => eval_fn_expr(lhs, rhs, ctx.fork()),
+        Expression::Apply(lhs, rhs) => eval_fn_expr(lhs, rhs, ctx),
     }
 }
 
@@ -237,7 +234,7 @@ fn eval_infix(op: Operator, lhs: Object, rhs: Object) -> Result<Object, EvalErro
         (Operator::Gt, Object::Float(a), Object::Int(b)) => Ok(Object::Bool(a > b as f64)),
         (Operator::Gte, Object::Float(a), Object::Int(b)) => Ok(Object::Bool(a >= b as f64)),
 
-        (Operator::Add, Object::Str(a), Object::Str(b)) => Ok(Object::Str(a.clone() + &b)),
+        (Operator::Add, Object::Str(a), Object::Str(b)) => Ok(Object::Str(a + &b)),
         (Operator::Eq, Object::Str(a), Object::Str(b)) => Ok(Object::Bool(a == b)),
         (Operator::Ne, Object::Str(a), Object::Str(b)) => Ok(Object::Bool(a != b)),
         (Operator::Lt, Object::Str(a), Object::Str(b)) => Ok(Object::Bool(a < b)),
@@ -254,24 +251,24 @@ fn eval_infix(op: Operator, lhs: Object, rhs: Object) -> Result<Object, EvalErro
     }
 }
 
-fn eval_fn_expr(lhs: &Expression, rhs: &[Expression], ctx: Context) -> Result<Object, EvalError> {
+fn eval_fn_expr(lhs: &Expression, rhs: &[Expression], ctx: &Context) -> Result<Object, EvalError> {
     match lhs {
+        Expression::Apply(expr, args) => {
+            if let Object::Func(args, body, snap) = eval_fn_expr(expr, args, ctx)? {
+                eval_fn(&args, &body, rhs, ctx, &snap)
+            } else {
+                Err(EvalError::Apply(*expr.to_owned()))
+            }
+        }
         Expression::Var(name) if ctx.has(name) => {
             if let Object::Func(args, body, snap) = ctx.get(name).unwrap() {
-                eval_fn(args, body, rhs, ctx.extend(snap))
+                eval_fn(args, body, rhs, ctx, snap)
             } else {
                 Err(EvalError::NotFunction(name.clone()))
             }
         }
         Expression::Var(name) => Err(EvalError::NotFound(name.to_string())),
-        Expression::Fn(args, body) => eval_fn(&args, &body, rhs, ctx.fork()),
-        Expression::Apply(expr, args) => {
-            if let Object::Func(args, body, snap) = eval_fn_expr(expr, args, ctx.fork())? {
-                eval_fn(&args, &body, rhs, ctx.extend(&snap))
-            } else {
-                Err(EvalError::Apply(*expr.to_owned()))
-            }
-        }
+        Expression::Fn(args, body) => eval_fn(args, body, rhs, ctx, &Snapshot::default()),
         _ => Err(EvalError::Apply(lhs.clone())),
     }
 }
@@ -280,15 +277,16 @@ fn eval_fn(
     args: &[String],
     body: &[Statement],
     rhs: &[Expression],
-    ctx: Context,
+    ctx: &Context,
+    snap: &Snapshot,
 ) -> Result<Object, EvalError> {
     if args.len() != rhs.len() {
         return Err(EvalError::ApplyArgsCount(args.len(), rhs.len()));
     }
 
-    let mut fn_ctx = ctx.fork();
-    for (name, expr) in args.into_iter().zip(rhs.into_iter()) {
-        let obj = eval_expr(expr, ctx.fork())?;
+    let mut fn_ctx = ctx.extend(snap);
+    for (name, expr) in args.iter().zip(rhs.iter()) {
+        let obj = eval_expr(expr, ctx)?;
         fn_ctx.put(name.clone(), obj);
     }
 
@@ -346,7 +344,7 @@ mod tests {
                     ctx.put(name, object);
                     ctx
                 });
-            let res = eval_expr(&expr, ctx);
+            let res = eval_expr(&expr, &ctx);
 
             assert_eq!(res, obj, "expr={:?} obj={:?} res={:?}", expr, obj, res);
         }
@@ -425,22 +423,41 @@ mod tests {
                 ],
                 Ok(Object::Int(42)),
             ),
+            (
+                vec![
+                    "let f = fn (x) { fn(y) { x + y } };",
+                    "let g = f(40);",
+                    "let apply = fn(x, F) { F(x) };",
+                    "apply(2, g)",
+                ],
+                Ok(Object::Int(42)),
+            ),
+            (
+                vec![
+                    "let f = fn(a) { fn(b) { fn(c) { a+b+c } } };",
+                    "f(100)(20)(3)",
+                ],
+                Ok(Object::Int(123)),
+            ),
         ];
 
         for (src, obj) in tests {
-            let mut ctx = Context::default();
-
-            let mut res = Ok(Object::Unit);
-            for line in src.iter() {
-                let buf = Buffer::from_string(line);
-                let tokens = tokenize(&buf).unwrap();
-                let buf = Buffer::new(tokens);
-                let tree = parse(&buf).unwrap();
-                res = eval(&tree, &mut ctx);
-            }
-
+            let res = run_eval(&src);
             assert_eq!(res, obj, "{:#?}", src);
         }
+    }
+
+    fn run_eval(src: &[&str]) -> Result<Object, EvalError> {
+        let mut ctx = Context::default();
+        let mut res = Ok(Object::Unit);
+        for line in src.iter() {
+            let buf = Buffer::from_string(line);
+            let tokens = tokenize(&buf).unwrap();
+            let buf = Buffer::new(tokens);
+            let tree = parse(&buf).unwrap();
+            res = eval(&tree, &mut ctx);
+        }
+        res
     }
 
     #[test]
