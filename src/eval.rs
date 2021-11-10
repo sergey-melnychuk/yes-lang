@@ -135,7 +135,8 @@ fn eval_stmt(stmt: &Statement, ctx: &mut Context) -> Result<Object, EvalError> {
         }
 
         Statement::Fn(name, args, body) => {
-            let snapshot = ctx.snapshot(); // TODO Limit snapshot only to variables referenced in the function body?
+            // TODO Limit snapshot only to variables referenced in the function body?
+            let snapshot = ctx.snapshot();
             let f = Object::Func(args.to_owned(), body.to_owned(), snapshot);
             ctx.put(name.clone(), f);
             Ok(Object::Unit)
@@ -303,7 +304,7 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn test_eval_expr() {
+    fn test_eval() {
         let tests = vec![
             (
                 Expression::Lit(TRUE.to_string()),

@@ -424,7 +424,7 @@ mod tests {
     use crate::lexer::tokenize;
 
     #[test]
-    fn test_parse_statement() {
+    fn test_stmt() {
         let tests = vec![
             (
                 "let ;",
@@ -689,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_expression() {
+    fn test_expr() {
         let tests = vec![
             (
                 "-x",

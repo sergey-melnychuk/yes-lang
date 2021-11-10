@@ -128,7 +128,7 @@ mod tests {
     use crate::buffer::Buffer;
 
     #[test]
-    fn test_tokenizer() {
+    fn test_lexer() {
         let tests = vec![
             (
                 "let abc = 123;",
