@@ -45,7 +45,6 @@ pub(crate) enum Statement {
     Ret(Expression),
     If(Expression, Vec<Statement>, Vec<Statement>),
     Fn(String, Vec<String>, Vec<Statement>),
-    Call(Box<Expression>, Vec<Expression>),
     Expr(Expression),
 }
 
@@ -71,7 +70,7 @@ pub(crate) fn parse(buffer: &Buffer<Token>) -> Result<Vec<Statement>, ParserErro
                 next
             }
         } else {
-            return Err(ParserError::Eof);
+            return Err(ParserError::Unexpected(Token::End));
         };
 
         if token == &Token::Keyword(LET) {
@@ -95,14 +94,6 @@ pub(crate) fn parse(buffer: &Buffer<Token>) -> Result<Vec<Statement>, ParserErro
                 let stmt = Statement::Expr(expr);
                 result.push(stmt);
             }
-        } else if token == &Token::Delimiter('(') {
-            let expr = parse_expression(buffer, Operator::MIN_RANK)?;
-            expect(buffer, &Token::Delimiter(')'))?;
-            let apply = parse_fn_application(expr, buffer)?;
-            if let Expression::Apply(body, args) = apply {
-                let stmt = Statement::Call(body, args);
-                result.push(stmt);
-            }
         } else {
             buffer.back();
             let pos = buffer.pos();
@@ -121,7 +112,7 @@ fn next(buffer: &Buffer<Token>) -> Result<&Token, ParserError> {
     if let Some(token) = buffer.next() {
         Ok(token)
     } else {
-        Err(ParserError::Eof)
+        Err(ParserError::Unexpected(Token::End))
     }
 }
 
@@ -129,19 +120,19 @@ fn peek(buffer: &Buffer<Token>) -> Result<&Token, ParserError> {
     if let Some(token) = buffer.peek() {
         Ok(token)
     } else {
-        Err(ParserError::Eof)
+        Err(ParserError::Unexpected(Token::End))
     }
 }
 
 fn expect(buffer: &Buffer<Token>, expected: &Token) -> Result<(), ParserError> {
     if let Some(token) = buffer.next() {
         if token != expected {
-            Err(ParserError::Token(expected.clone(), token.clone()))
+            Err(ParserError::Mismatch(expected.clone(), token.clone()))
         } else {
             Ok(())
         }
     } else {
-        Err(ParserError::Eof)
+        Err(ParserError::Unexpected(Token::End))
     }
 }
 
@@ -274,7 +265,7 @@ fn parse_expression(buffer: &Buffer<Token>, rank: usize) -> Result<Expression, P
     } else if let Token::Keyword(FALSE) = token {
         Expression::Lit(FALSE.to_string())
     } else {
-        return Err(ParserError::Token(Token::Keyword("*"), token.clone()));
+        return Err(ParserError::Unexpected(token.clone()));
     };
 
     while let Token::Operator(_) = peek(buffer)? {
@@ -295,7 +286,7 @@ fn parse_expression(buffer: &Buffer<Token>, rank: usize) -> Result<Expression, P
 fn parse_let_statement(buffer: &Buffer<Token>) -> Result<Statement, ParserError> {
     let token = peek(buffer)?;
     if !is_identifier(token) {
-        return Err(ParserError::Token(
+        return Err(ParserError::Mismatch(
             Token::Identifier("*".to_string()),
             token.clone(),
         ));
@@ -331,7 +322,7 @@ fn parse_fn_definition(buffer: &Buffer<Token>) -> Result<Statement, ParserError>
     let name = if let Token::Identifier(id) = token {
         id.to_owned()
     } else {
-        return Err(ParserError::Token(
+        return Err(ParserError::Mismatch(
             Token::Identifier("*".to_string()),
             token.clone(),
         ));
@@ -352,7 +343,7 @@ fn parse_fn_definition(buffer: &Buffer<Token>) -> Result<Statement, ParserError>
         if token == &Token::Delimiter(',') {
             continue;
         }
-        return Err(ParserError::Token(Token::Delimiter(')'), token.clone()));
+        return Err(ParserError::Mismatch(Token::Delimiter(')'), token.clone()));
     }
 
     expect(buffer, &Token::Delimiter('{'))?;
@@ -378,7 +369,7 @@ fn parse_fn_expression(buffer: &Buffer<Token>) -> Result<Expression, ParserError
         if token == &Token::Delimiter(',') {
             continue;
         }
-        return Err(ParserError::Token(Token::Delimiter(')'), token.clone()));
+        return Err(ParserError::Mismatch(Token::Delimiter(')'), token.clone()));
     }
 
     expect(buffer, &Token::Delimiter('{'))?;
@@ -428,14 +419,14 @@ mod tests {
         let tests = vec![
             (
                 "let ;",
-                Err(ParserError::Token(
+                Err(ParserError::Mismatch(
                     Token::Identifier("*".to_string()),
                     Token::Delimiter(';'),
                 )),
             ),
             (
                 "let 123",
-                Err(ParserError::Token(
+                Err(ParserError::Mismatch(
                     Token::Identifier("*".to_string()),
                     Token::Literal("123".to_string()),
                 )),
@@ -447,10 +438,9 @@ mod tests {
                     Expression::Var("abc".to_string()),
                 )),
             ),
-            (
-                "let x =",
-                Err(ParserError::Token(Token::Keyword("*"), Token::End)),
-            ),
+            ("let x =", Err(ParserError::Unexpected(Token::End))),
+            ("{", Ok(vec![])),
+            ("[", Ok(vec![])),
             (
                 "let answer = 42;",
                 Ok(vec![Statement::Let(
@@ -633,7 +623,7 @@ mod tests {
             ),
             (
                 "(fn(a,b) {return a+b;})(1,2);",
-                Ok(vec![Statement::Call(
+                Ok(vec![Statement::Expr(Expression::Apply(
                     Box::new(Expression::Fn(
                         vec!["a".to_string(), "b".to_string()],
                         vec![Statement::Ret(Expression::Infix(
@@ -646,7 +636,7 @@ mod tests {
                         Expression::Lit("1".to_string()),
                         Expression::Lit("2".to_string()),
                     ],
-                )]),
+                ))]),
             ),
             (
                 "x + y",
@@ -658,7 +648,7 @@ mod tests {
             ),
             (
                 "let f = fn(a, b) { a + b }",
-                Err(ParserError::Token(Token::Delimiter(';'), Token::End)),
+                Err(ParserError::Mismatch(Token::Delimiter(';'), Token::End)),
             ),
             (
                 "fn g(a) { return fn(b) { f(a,b) }; }",
@@ -677,6 +667,22 @@ mod tests {
                     ))],
                 )]),
             ),
+            (
+                "1 + (2)",
+                Ok(vec![Statement::Expr(Expression::Infix(
+                    Box::new(Expression::Lit("1".to_string())),
+                    Operator::Add,
+                    Box::new(Expression::Lit("2".to_string())),
+                ))]),
+            ),
+            (
+                "(1) + 2",
+                Ok(vec![Statement::Expr(Expression::Infix(
+                    Box::new(Expression::Lit("1".to_string())),
+                    Operator::Add,
+                    Box::new(Expression::Lit("2".to_string())),
+                ))]),
+            ),
         ];
 
         for (src, expected) in tests {
@@ -684,7 +690,7 @@ mod tests {
             let buf = Buffer::new(tokens);
             let parsed = parse(&buf);
 
-            assert_eq!(parsed, expected, "{}", src);
+            assert_eq!(parsed, expected, "src=\"{}\"", src);
         }
     }
 

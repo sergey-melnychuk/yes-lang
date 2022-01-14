@@ -56,7 +56,7 @@ pub(crate) fn is_keyword(token: &str) -> bool {
 }
 
 pub(crate) fn is_delimiter(c: char) -> bool {
-    c == ';' || c == ',' || c == '{' || c == '}' || c == '(' || c == ')'
+    c == ';' || c == ',' || c == '{' || c == '}' || c == '(' || c == ')' || c == '[' || c == ']'
 }
 
 pub(crate) fn is_operator(c: char) -> bool {
@@ -79,5 +79,5 @@ pub(crate) fn is_identifier(token: &str) -> bool {
         .next()
         .map(|c| c.is_ascii_alphabetic() || c == '_')
         .unwrap_or_default();
-    first_char_is_alphabetic_or_underscore && chars.all(|c| c.is_ascii_alphanumeric())
+    first_char_is_alphabetic_or_underscore && chars.skip(1).all(|c| c.is_ascii_alphanumeric())
 }

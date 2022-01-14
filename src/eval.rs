@@ -142,8 +142,6 @@ fn eval_stmt(stmt: &Statement, ctx: &mut Context) -> Result<Object, EvalError> {
             Ok(Object::Unit)
         }
 
-        Statement::Call(lhs, rhs) => eval_fn_expr(lhs, rhs, ctx),
-
         Statement::Expr(expr) => eval_expr(expr, ctx),
     }
 }

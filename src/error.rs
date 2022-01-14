@@ -25,8 +25,8 @@ impl std::error::Error for TokenError {}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ParserError {
-    Eof,
-    Token(Token, Token),
+    Unexpected(Token),
+    Mismatch(Token, Token),
     Prefix(Token),
     Infix(Token),
     Op(Operator, Expression),
@@ -35,8 +35,8 @@ pub(crate) enum ParserError {
 impl Display for ParserError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            ParserError::Eof => write!(f, "Unexpected EOF"),
-            ParserError::Token(expected, got) => {
+            ParserError::Unexpected(token) => write!(f, "Unexpected '{:?}'", token),
+            ParserError::Mismatch(expected, got) => {
                 write!(f, "Expected '{:?}' but got '{:?}'", expected, got)
             }
             ParserError::Prefix(token) => write!(f, "No prefix version of '{:?}' exists", token),

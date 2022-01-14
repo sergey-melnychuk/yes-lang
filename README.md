@@ -32,9 +32,9 @@ Non-goals:
 
 #### Build
 
-`cargo build --release`
+`cargo build`
 
-`cargo test --release`
+`cargo test`
 
 ### Run
 
