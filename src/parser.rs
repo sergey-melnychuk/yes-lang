@@ -62,16 +62,10 @@ pub(crate) fn parse(buffer: &Buffer<Token>) -> Result<Vec<Statement>, ParserErro
     let mut result = Vec::new();
 
     loop {
-        let token = if let Some(next) = buffer.peek() {
-            if next == &Token::End {
-                return Ok(result);
-            } else {
-                let _ = buffer.next();
-                next
-            }
-        } else {
-            return Err(ParserError::Unexpected(Token::End));
-        };
+        let token = next(buffer)?;
+        if token == &Token::End {
+            return Ok(result);
+        }
 
         if token == &Token::Keyword(LET) {
             let stmt = parse_let_statement(buffer)?;
@@ -243,11 +237,10 @@ fn parse_expression(buffer: &Buffer<Token>, rank: usize) -> Result<Expression, P
     } else if let Token::Literal(lit) = token {
         Expression::Lit(lit.to_owned())
     } else if let Token::Identifier(id) = token {
-        if let Token::Delimiter('(') = peek(buffer)? {
-            let name = Expression::Var(id.to_owned());
-            parse_fn_application(name, buffer)?
-        } else {
-            Expression::Var(id.to_owned())
+        let var = Expression::Var(id.to_owned());
+        match peek(buffer)? {
+            Token::Delimiter('(') => parse_fn_application(var, buffer)?,
+            _ => var,
         }
     } else if let Token::Keyword(FN) = token {
         parse_fn_expression(buffer)?
