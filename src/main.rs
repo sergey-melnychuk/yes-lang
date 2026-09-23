@@ -456,10 +456,10 @@ mod tests {
         assert!(apply(&predicate, &ctx, "tx", r#"{"n": 5}"#, limits)
             .unwrap()
             .is_some());
-        assert!(matches!(
-            apply(&predicate, &ctx, "tx", r#"{"n": 50}"#, limits),
-            Err(Error::Eval(EvalError::CallLimit(10)))
-        ));
+        match apply(&predicate, &ctx, "tx", r#"{"n": 50}"#, limits) {
+            Err(Error::Eval(e)) => assert_eq!(e.without_position(), EvalError::CallLimit(10)),
+            result => panic!("unexpected: {:?}", result),
+        }
         assert!(apply(&predicate, &ctx, "tx", r#"{"n": 5}"#, limits)
             .unwrap()
             .is_some());

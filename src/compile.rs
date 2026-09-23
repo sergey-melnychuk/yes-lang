@@ -12,8 +12,8 @@ use std::rc::Rc;
 use crate::builtin::Builtin;
 use crate::error::{Error, EvalError};
 use crate::eval::{
-    eval, eval_eq, eval_index, eval_infix, eval_prefix, eval_slice, get_field, lookup, with_limits,
-    CallDepthGuard, Context, Flow, Function, Limits, Object,
+    at, eval, eval_eq, eval_index, eval_infix, eval_prefix, eval_slice, get_field, lookup,
+    with_limits, CallDepthGuard, Context, Flow, Function, Limits, Object,
 };
 use crate::parser::{Expression, Operator, Statement};
 
@@ -95,6 +95,7 @@ fn compile_stmt(stmt: &Statement) -> Stmt {
         }
 
         Statement::If(cond, if_clause, else_clause) => {
+            let pos = cond.position();
             let cond = compile_expr(cond);
             let if_clause = compile_block(if_clause);
             let else_clause = compile_block(else_clause);
@@ -109,7 +110,7 @@ fn compile_stmt(stmt: &Statement) -> Stmt {
             Box::new(move |ctx| match cond(ctx)? {
                 Object::Bool(true) => run(&if_clause, ctx),
                 Object::Bool(false) => run(&else_clause, ctx),
-                obj => Err(EvalError::NotBoolean(obj)),
+                obj => Err(at(EvalError::NotBoolean(obj), pos)),
             })
         }
 
@@ -162,6 +163,12 @@ fn run_exprs(exprs: &[Expr], ctx: &Context) -> Result<Vec<Object>, EvalError> {
 
 fn compile_expr(expr: &Expression) -> Expr {
     match expr {
+        Expression::At(pos, expr) => {
+            let pos = *pos;
+            let expr = compile_expr(expr);
+            Box::new(move |ctx| expr(ctx).map_err(|e| e.at(pos)))
+        }
+
         Expression::Lit(lit) => {
             let obj: Object = lit.into();
             Box::new(move |_| Ok(obj.clone()))
@@ -218,10 +225,10 @@ fn compile_expr(expr: &Expression) -> Expr {
         // a call of a builtin with literal arguments always gives the same result, so it
         // is evaluated once, unless the name is bound (the builtin is shadowed)
         Expression::Apply(callee, args)
-            if matches!(&**callee, Expression::Var(name) if Builtin::from_name(name).is_some())
+            if matches!(callee.inner(), Expression::Var(name) if Builtin::from_name(name).is_some())
                 && args.iter().all(|arg| literal(arg).is_some()) =>
         {
-            let name = match &**callee {
+            let name = match callee.inner() {
                 Expression::Var(name) => name.clone(),
                 _ => unreachable!(),
             };
@@ -277,6 +284,20 @@ fn compile_expr(expr: &Expression) -> Expr {
             Box::new(move |ctx| Ok(Object::List(Rc::new(run_exprs(&items, ctx)?))))
         }
 
+        Expression::Record(fields) => {
+            let fields: Vec<(String, Expr)> = fields
+                .iter()
+                .map(|(name, expr)| (name.clone(), compile_expr(expr)))
+                .collect();
+            Box::new(move |ctx| {
+                let fields = fields
+                    .iter()
+                    .map(|(name, expr)| Ok((name.clone(), expr(ctx)?)))
+                    .collect::<Result<_, EvalError>>()?;
+                Ok(Object::Record(Rc::new(fields)))
+            })
+        }
+
         Expression::Field(target, name) => {
             let target = compile_expr(target);
             let name = name.clone();
@@ -324,13 +345,13 @@ mod tests {
     #[test]
     fn test_cached_builtin_call() {
         let p = program("selector(\"transfer(address,uint256)\")");
-        let selector = Ok(Object::Bytes(vec![0xa9, 0x05, 0x9c, 0xbb]));
+        let selector = Ok(Object::Bytes(vec![0xa9, 0x05, 0x9c, 0xbb].into()));
         assert_eq!(p.run(&Context::default()), selector);
         // the cached result is used only while the builtin is not shadowed
         let ctx = Context::default();
         ctx.put("selector".to_string(), Object::Int(1.into()));
         assert_eq!(
-            p.run(&ctx),
+            p.run(&ctx).map_err(EvalError::without_position),
             Err(EvalError::NotFunction(Object::Int(1.into())))
         );
         assert_eq!(p.run(&Context::default()), selector);
@@ -342,7 +363,8 @@ mod tests {
         let p = program("int(\"x\")");
         for _ in 0..2 {
             assert_eq!(
-                p.run(&Context::default()),
+                p.run(&Context::default())
+                    .map_err(EvalError::without_position),
                 Err(EvalError::Argument("int", Object::Str("x".to_string())))
             );
         }

@@ -1,5 +1,7 @@
 use num_bigint::BigInt;
 
+use std::ops::Deref;
+
 use crate::buffer::{Buffer, Iterable};
 use crate::error::ParserError;
 use crate::token::*;
@@ -75,16 +77,75 @@ pub(crate) enum Expression {
     ),
     Field(Box<Expression>, String),
     List(Vec<Expression>),
+    Record(Vec<(String, Expression)>),
+    // position of an expression that can fail at runtime, to report errors
+    At(Pos, Box<Expression>),
 }
 
-pub(crate) fn parse(buffer: &Buffer<Token>) -> Result<Vec<Statement>, ParserError> {
+impl Expression {
+    pub(crate) fn position(&self) -> Option<Pos> {
+        match self {
+            Expression::At(pos, _) => Some(*pos),
+            _ => None,
+        }
+    }
+
+    // the expression without its position
+    pub(crate) fn inner(&self) -> &Expression {
+        match self {
+            Expression::At(_, expr) => expr.inner(),
+            expr => expr,
+        }
+    }
+}
+
+fn at(pos: Pos, expr: Expression) -> Expression {
+    Expression::At(pos, Box::new(expr))
+}
+
+/// Tokens with their positions in the source.
+pub(crate) struct Input {
+    tokens: Buffer<Token>,
+    positions: Vec<Pos>,
+}
+
+impl Input {
+    pub(crate) fn new(tokens: Vec<Token>, positions: Vec<Pos>) -> Self {
+        Input {
+            tokens: Buffer::new(tokens),
+            positions,
+        }
+    }
+
+    /// Position of the token returned by the latest `next` or `peek`.
+    pub(crate) fn pos(&self) -> Pos {
+        let idx = self
+            .tokens
+            .last()
+            .min(self.positions.len().saturating_sub(1));
+        self.positions
+            .get(idx)
+            .copied()
+            .unwrap_or(Pos { line: 1, col: 1 })
+    }
+}
+
+impl Deref for Input {
+    type Target = Buffer<Token>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tokens
+    }
+}
+
+pub(crate) fn parse(buffer: &Input) -> Result<Vec<Statement>, ParserError> {
     let result = parse_block(buffer)?;
     expect(buffer, &Token::End)?;
     Ok(result)
 }
 
 // parses statements up to (but not including) the closing '}' or the end of input
-fn parse_block(buffer: &Buffer<Token>) -> Result<Vec<Statement>, ParserError> {
+fn parse_block(buffer: &Input) -> Result<Vec<Statement>, ParserError> {
     let mut result = Vec::new();
     loop {
         match peek(buffer)? {
@@ -97,7 +158,7 @@ fn parse_block(buffer: &Buffer<Token>) -> Result<Vec<Statement>, ParserError> {
     }
 }
 
-fn parse_statement(buffer: &Buffer<Token>) -> Result<Statement, ParserError> {
+fn parse_statement(buffer: &Input) -> Result<Statement, ParserError> {
     let token = next(buffer)?;
     if token == &Token::Keyword(LET) {
         let stmt = parse_let_statement(buffer)?;
@@ -120,7 +181,7 @@ fn parse_statement(buffer: &Buffer<Token>) -> Result<Statement, ParserError> {
 }
 
 // a statement is terminated by ';', or it is the last one in a block
-fn end_of_statement(buffer: &Buffer<Token>) -> Result<(), ParserError> {
+fn end_of_statement(buffer: &Input) -> Result<(), ParserError> {
     match peek(buffer)? {
         Token::Delimiter(';') => {
             let _ = next(buffer)?;
@@ -131,7 +192,7 @@ fn end_of_statement(buffer: &Buffer<Token>) -> Result<(), ParserError> {
     }
 }
 
-fn next(buffer: &Buffer<Token>) -> Result<&Token, ParserError> {
+fn next(buffer: &Input) -> Result<&Token, ParserError> {
     if let Some(token) = buffer.next() {
         Ok(token)
     } else {
@@ -139,7 +200,7 @@ fn next(buffer: &Buffer<Token>) -> Result<&Token, ParserError> {
     }
 }
 
-fn peek(buffer: &Buffer<Token>) -> Result<&Token, ParserError> {
+fn peek(buffer: &Input) -> Result<&Token, ParserError> {
     if let Some(token) = buffer.peek() {
         Ok(token)
     } else {
@@ -147,7 +208,7 @@ fn peek(buffer: &Buffer<Token>) -> Result<&Token, ParserError> {
     }
 }
 
-fn expect(buffer: &Buffer<Token>, expected: &Token) -> Result<(), ParserError> {
+fn expect(buffer: &Input, expected: &Token) -> Result<(), ParserError> {
     if let Some(token) = buffer.next() {
         if token != expected {
             Err(ParserError::Mismatch(expected.clone(), token.clone()))
@@ -159,7 +220,7 @@ fn expect(buffer: &Buffer<Token>, expected: &Token) -> Result<(), ParserError> {
     }
 }
 
-fn expect_identifier(buffer: &Buffer<Token>) -> Result<String, ParserError> {
+fn expect_identifier(buffer: &Input) -> Result<String, ParserError> {
     match next(buffer)? {
         Token::Identifier(id) => Ok(id.to_owned()),
         token => Err(ParserError::Mismatch(
@@ -190,11 +251,11 @@ fn parse_literal(lit: &str) -> Result<Literal, ParserError> {
 }
 
 trait PrefixParser {
-    fn parse(&mut self, token: &Token, buffer: &Buffer<Token>) -> Result<Expression, ParserError>;
+    fn parse(&mut self, token: &Token, buffer: &Input) -> Result<Expression, ParserError>;
 }
 
 impl PrefixParser for Operator {
-    fn parse(&mut self, token: &Token, buffer: &Buffer<Token>) -> Result<Expression, ParserError> {
+    fn parse(&mut self, token: &Token, buffer: &Input) -> Result<Expression, ParserError> {
         match self {
             Operator::Not | Operator::Neg => {
                 let rhs = parse_expression(buffer, self.rank())?;
@@ -219,7 +280,7 @@ trait InfixParser {
         &mut self,
         lhs: Expression,
         token: &Token,
-        buffer: &Buffer<Token>,
+        buffer: &Input,
     ) -> Result<Expression, ParserError>;
 }
 
@@ -232,7 +293,7 @@ impl InfixParser for Operator {
         &mut self,
         lhs: Expression,
         token: &Token,
-        buffer: &Buffer<Token>,
+        buffer: &Input,
     ) -> Result<Expression, ParserError> {
         match self {
             Operator::Add
@@ -288,17 +349,18 @@ fn is_postfix(token: &Token) -> bool {
     )
 }
 
-fn parse_expression(buffer: &Buffer<Token>, rank: usize) -> Result<Expression, ParserError> {
+fn parse_expression(buffer: &Input, rank: usize) -> Result<Expression, ParserError> {
     let token = next(buffer)?;
+    let pos = buffer.pos();
     let mut expr = match token {
         Token::Operator(_) => match get_prefix_parser(token) {
-            Some(mut op) => op.parse(token, buffer)?,
+            Some(mut op) => at(pos, op.parse(token, buffer)?),
             None => return Err(ParserError::Prefix(token.clone())),
         },
         Token::Literal(lit) => Expression::Lit(parse_literal(lit)?),
         Token::Str(s) => Expression::Lit(Literal::Str(s.to_owned())),
         Token::Bytes(b) => Expression::Lit(Literal::Bytes(b.to_owned())),
-        Token::Identifier(id) => Expression::Var(id.to_owned()),
+        Token::Identifier(id) => at(pos, Expression::Var(id.to_owned())),
         Token::Keyword(FN) => parse_fn_expression(buffer)?,
         Token::Keyword(TRUE) => Expression::Lit(Literal::Bool(true)),
         Token::Keyword(FALSE) => Expression::Lit(Literal::Bool(false)),
@@ -309,6 +371,7 @@ fn parse_expression(buffer: &Buffer<Token>, rank: usize) -> Result<Expression, P
             expr
         }
         Token::Delimiter('[') => Expression::List(parse_list(buffer, ']')?),
+        Token::Delimiter('{') => Expression::Record(parse_record(buffer)?),
         _ => return Err(ParserError::Unexpected(token.clone())),
     };
 
@@ -322,7 +385,8 @@ fn parse_expression(buffer: &Buffer<Token>, rank: usize) -> Result<Expression, P
         match get_infix_parser(token) {
             Some(mut op) if rank < op.rank() => {
                 let _ = next(buffer)?;
-                expr = op.parse(expr, token, buffer)?;
+                let pos = buffer.pos();
+                expr = at(pos, op.parse(expr, token, buffer)?);
             }
             _ => break,
         }
@@ -332,8 +396,18 @@ fn parse_expression(buffer: &Buffer<Token>, rank: usize) -> Result<Expression, P
 }
 
 // parses one of: call 'f(a, b)', index 'x[i]', slice 'x[a..b]' or field access 'x.name'
-fn parse_postfix(expr: Expression, buffer: &Buffer<Token>) -> Result<Expression, ParserError> {
-    match next(buffer)? {
+fn parse_postfix(expr: Expression, buffer: &Input) -> Result<Expression, ParserError> {
+    let token = next(buffer)?;
+    let pos = buffer.pos();
+    parse_postfix_op(expr, token, buffer).map(|expr| at(pos, expr))
+}
+
+fn parse_postfix_op(
+    expr: Expression,
+    token: &Token,
+    buffer: &Input,
+) -> Result<Expression, ParserError> {
+    match token {
         Token::Delimiter('(') => {
             let args = parse_list(buffer, ')')?;
             Ok(Expression::Apply(Box::new(expr), args))
@@ -366,15 +440,17 @@ fn parse_postfix(expr: Expression, buffer: &Buffer<Token>) -> Result<Expression,
     }
 }
 
-fn parse_let_statement(buffer: &Buffer<Token>) -> Result<Statement, ParserError> {
+fn parse_let_statement(buffer: &Input) -> Result<Statement, ParserError> {
     let name = expect_identifier(buffer)?;
     expect(buffer, &Token::Operator(BIND))?;
     let expr = parse_expression(buffer, Operator::MIN_RANK)?;
     Ok(Statement::Let(name, expr))
 }
 
-fn parse_if_statement(buffer: &Buffer<Token>) -> Result<Statement, ParserError> {
-    let cond = parse_expression(buffer, Operator::MIN_RANK)?;
+fn parse_if_statement(buffer: &Input) -> Result<Statement, ParserError> {
+    // the condition is at the position of 'if', for an error when it is not a boolean
+    let pos = buffer.pos();
+    let cond = at(pos, parse_expression(buffer, Operator::MIN_RANK)?);
     let if_clause = parse_braced_block(buffer)?;
     let else_clause = if peek(buffer)? == &Token::Keyword(ELSE) {
         let _ = next(buffer)?;
@@ -391,14 +467,14 @@ fn parse_if_statement(buffer: &Buffer<Token>) -> Result<Statement, ParserError> 
     Ok(Statement::If(cond, if_clause, else_clause))
 }
 
-fn parse_braced_block(buffer: &Buffer<Token>) -> Result<Vec<Statement>, ParserError> {
+fn parse_braced_block(buffer: &Input) -> Result<Vec<Statement>, ParserError> {
     expect(buffer, &Token::Delimiter('{'))?;
     let block = parse_block(buffer)?;
     expect(buffer, &Token::Delimiter('}'))?;
     Ok(block)
 }
 
-fn parse_fn_params(buffer: &Buffer<Token>) -> Result<Vec<String>, ParserError> {
+fn parse_fn_params(buffer: &Input) -> Result<Vec<String>, ParserError> {
     let mut params = Vec::new();
     expect(buffer, &Token::Delimiter('('))?;
     if peek(buffer)? == &Token::Delimiter(')') {
@@ -417,7 +493,7 @@ fn parse_fn_params(buffer: &Buffer<Token>) -> Result<Vec<String>, ParserError> {
 
 // parses comma-separated expressions after the opening bracket up to and including
 // the closing one, a trailing comma is allowed: call arguments 'f(a, b)' or a list '[a, b,]'
-fn parse_list(buffer: &Buffer<Token>, closing: char) -> Result<Vec<Expression>, ParserError> {
+fn parse_list(buffer: &Input, closing: char) -> Result<Vec<Expression>, ParserError> {
     let mut items = Vec::new();
     loop {
         if peek(buffer)? == &Token::Delimiter(closing) {
@@ -438,17 +514,86 @@ fn parse_list(buffer: &Buffer<Token>, closing: char) -> Result<Vec<Expression>, 
     }
 }
 
-fn parse_fn_definition(buffer: &Buffer<Token>) -> Result<Statement, ParserError> {
+// parses 'name: expr' or '"any key": expr' pairs after the opening '{' up to and including
+// the closing '}', a trailing comma is allowed
+fn parse_record(buffer: &Input) -> Result<Vec<(String, Expression)>, ParserError> {
+    let mut fields: Vec<(String, Expression)> = Vec::new();
+    loop {
+        let key = match next(buffer)? {
+            Token::Delimiter('}') => return Ok(fields),
+            Token::Identifier(key) | Token::Str(key) => key.clone(),
+            token => {
+                return Err(ParserError::Mismatch(
+                    Token::Identifier("*".to_string()),
+                    token.clone(),
+                ))
+            }
+        };
+        if fields.iter().any(|(k, _)| *k == key) {
+            return Err(ParserError::DuplicateKey(key));
+        }
+        expect(buffer, &Token::Delimiter(':'))?;
+        fields.push((key, parse_expression(buffer, Operator::MIN_RANK)?));
+        match next(buffer)? {
+            Token::Delimiter('}') => return Ok(fields),
+            Token::Delimiter(',') => continue,
+            token => return Err(ParserError::Mismatch(Token::Delimiter('}'), token.clone())),
+        }
+    }
+}
+
+fn parse_fn_definition(buffer: &Input) -> Result<Statement, ParserError> {
     let name = expect_identifier(buffer)?;
     let params = parse_fn_params(buffer)?;
     let body = parse_braced_block(buffer)?;
     Ok(Statement::Fn(name, params, body))
 }
 
-fn parse_fn_expression(buffer: &Buffer<Token>) -> Result<Expression, ParserError> {
+fn parse_fn_expression(buffer: &Input) -> Result<Expression, ParserError> {
     let params = parse_fn_params(buffer)?;
     let body = parse_braced_block(buffer)?;
     Ok(Expression::Fn(params, body))
+}
+
+// removes the positions, so that tests can compare the tree
+#[cfg(test)]
+pub(crate) fn strip(statements: Vec<Statement>) -> Vec<Statement> {
+    statements
+        .into_iter()
+        .map(|stmt| match stmt {
+            Statement::Let(name, expr) => Statement::Let(name, strip_expr(expr)),
+            Statement::Ret(expr) => Statement::Ret(strip_expr(expr)),
+            Statement::If(cond, a, b) => Statement::If(strip_expr(cond), strip(a), strip(b)),
+            Statement::Fn(name, params, body) => Statement::Fn(name, params, strip(body)),
+            Statement::Expr(expr) => Statement::Expr(strip_expr(expr)),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn strip_expr(expr: Expression) -> Expression {
+    let bx = |expr: Box<Expression>| Box::new(strip_expr(*expr));
+    let all = |exprs: Vec<Expression>| exprs.into_iter().map(strip_expr).collect();
+    match expr {
+        Expression::At(_, expr) => strip_expr(*expr),
+        Expression::Var(_) | Expression::Lit(_) => expr,
+        Expression::Fn(params, body) => Expression::Fn(params, strip(body)),
+        Expression::Apply(f, args) => Expression::Apply(bx(f), all(args)),
+        Expression::Prefix(op, rhs) => Expression::Prefix(op, bx(rhs)),
+        Expression::Infix(lhs, op, rhs) => Expression::Infix(bx(lhs), op, bx(rhs)),
+        Expression::Index(target, index) => Expression::Index(bx(target), bx(index)),
+        Expression::Slice(target, start, end) => {
+            Expression::Slice(bx(target), start.map(bx), end.map(bx))
+        }
+        Expression::Field(target, name) => Expression::Field(bx(target), name),
+        Expression::List(items) => Expression::List(all(items)),
+        Expression::Record(fields) => Expression::Record(
+            fields
+                .into_iter()
+                .map(|(name, expr)| (name, strip_expr(expr)))
+                .collect(),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -481,7 +626,61 @@ mod tests {
                 )),
             ),
             ("let x =", Err(ParserError::Unexpected(Token::End))),
-            ("{", Err(ParserError::Unexpected(Token::Delimiter('{')))),
+            (
+                "{",
+                Err(ParserError::Mismatch(
+                    Token::Identifier("*".to_string()),
+                    Token::End,
+                )),
+            ),
+            (
+                "{}; {a: 1, \"b c\": x,}",
+                Ok(vec![
+                    Statement::Expr(Expression::Record(vec![])),
+                    Statement::Expr(Expression::Record(vec![
+                        ("a".to_string(), Expression::Lit(Literal::Int(1.into()))),
+                        ("b c".to_string(), Expression::Var("x".to_string())),
+                    ])),
+                ]),
+            ),
+            (
+                "{a: 1, a: 2}",
+                Err(ParserError::DuplicateKey("a".to_string())),
+            ),
+            (
+                "{1: 2}",
+                Err(ParserError::Mismatch(
+                    Token::Identifier("*".to_string()),
+                    Token::Literal("1".to_string()),
+                )),
+            ),
+            (
+                "{a 1}",
+                Err(ParserError::Mismatch(
+                    Token::Delimiter(':'),
+                    Token::Literal("1".to_string()),
+                )),
+            ),
+            (
+                "{a: 1 b: 2}",
+                Err(ParserError::Mismatch(
+                    Token::Delimiter('}'),
+                    Token::Identifier("b".to_string()),
+                )),
+            ),
+            // a record in a condition
+            (
+                "if x == {} { 1 }",
+                Ok(vec![Statement::If(
+                    Expression::Infix(
+                        Box::new(Expression::Var("x".to_string())),
+                        Operator::Eq,
+                        Box::new(Expression::Record(vec![])),
+                    ),
+                    vec![Statement::Expr(Expression::Lit(Literal::Int(1.into())))],
+                    vec![],
+                )]),
+            ),
             ("[", Err(ParserError::Unexpected(Token::End))),
             (
                 "[1 2]",
@@ -828,8 +1027,7 @@ mod tests {
 
         for (src, expected) in tests {
             let tokens = tokenize(&Buffer::from_string(src)).unwrap();
-            let buf = Buffer::new(tokens);
-            let parsed = parse(&buf);
+            let parsed = parse(&Input::new(tokens, vec![])).map(strip);
 
             assert_eq!(parsed, expected, "src=\"{}\"", src);
         }
@@ -1165,8 +1363,8 @@ mod tests {
 
         for (src, expected) in tests {
             let tokens = tokenize(&Buffer::from_string(src)).unwrap();
-            let buffer = Buffer::new(tokens);
-            let parsed = parse_expression(&buffer, Operator::MIN_RANK);
+            let parsed =
+                parse_expression(&Input::new(tokens, vec![]), Operator::MIN_RANK).map(strip_expr);
 
             assert_eq!(parsed, expected, "{}", src);
         }

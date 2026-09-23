@@ -48,6 +48,33 @@ impl Pos {
     }
 }
 
+impl Pos {
+    /// Positions of the chars at `offsets` (in chars, ascending) in `source`, in one pass.
+    pub(crate) fn all(source: &str, offsets: &[usize]) -> Vec<Self> {
+        let mut positions = Vec::with_capacity(offsets.len());
+        let mut pos = Pos { line: 1, col: 1 };
+        let mut chars = source.chars();
+        let mut at = 0;
+        for &offset in offsets {
+            while at < offset {
+                match chars.next() {
+                    Some('\n') => {
+                        pos = Pos {
+                            line: pos.line + 1,
+                            col: 1,
+                        }
+                    }
+                    Some(_) => pos.col += 1,
+                    None => break,
+                }
+                at += 1;
+            }
+            positions.push(pos);
+        }
+        positions
+    }
+}
+
 impl std::fmt::Display for Pos {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.line, self.col)
@@ -94,7 +121,15 @@ pub(crate) fn is_keyword(token: &str) -> bool {
 }
 
 pub(crate) fn is_delimiter(c: char) -> bool {
-    c == ';' || c == ',' || c == '{' || c == '}' || c == '(' || c == ')' || c == '[' || c == ']'
+    c == ';'
+        || c == ','
+        || c == ':'
+        || c == '{'
+        || c == '}'
+        || c == '('
+        || c == ')'
+        || c == '['
+        || c == ']'
 }
 
 pub(crate) fn is_operator(c: char) -> bool {

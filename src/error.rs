@@ -32,6 +32,7 @@ pub enum ParserError {
     Prefix(Token),
     Infix(Token),
     InvalidLiteral(String),
+    DuplicateKey(String),
 }
 
 impl Display for ParserError {
@@ -44,6 +45,7 @@ impl Display for ParserError {
             ParserError::Prefix(token) => write!(f, "No prefix version of '{:?}' exists", token),
             ParserError::Infix(token) => write!(f, "No infix version of '{:?}' exists", token),
             ParserError::InvalidLiteral(lit) => write!(f, "Invalid literal: '{}'", lit),
+            ParserError::DuplicateKey(key) => write!(f, "Duplicate key: '{}'", key),
         }
     }
 }
@@ -66,6 +68,33 @@ pub enum EvalError {
     Index(Object, Object),
     IndexOutOfBounds(BigInt, usize),
     Field(Object, String),
+    /// An error at a position in the source.
+    At(Box<EvalError>, Pos),
+}
+
+impl EvalError {
+    /// Adds the position, unless the error already has one (the innermost position is kept).
+    pub(crate) fn at(self, pos: Pos) -> Self {
+        match self {
+            EvalError::At(..) => self,
+            e => EvalError::At(Box::new(e), pos),
+        }
+    }
+
+    pub fn position(&self) -> Option<Pos> {
+        match self {
+            EvalError::At(_, pos) => Some(*pos),
+            _ => None,
+        }
+    }
+
+    /// The error without its position.
+    pub fn without_position(self) -> Self {
+        match self {
+            EvalError::At(e, _) => *e,
+            e => e,
+        }
+    }
 }
 
 impl Display for EvalError {
@@ -92,6 +121,7 @@ impl Display for EvalError {
             }
             EvalError::CallLimit(calls) => write!(f, "Call limit exceeded: {} calls", calls),
             EvalError::NotJson(obj) => write!(f, "Cannot convert '{}' to JSON", obj),
+            EvalError::At(e, pos) => write!(f, "{} at {}", e, pos),
             EvalError::Index(obj, idx) => write!(f, "Cannot index '{}' with '{}'", obj, idx),
             EvalError::IndexOutOfBounds(idx, len) => {
                 write!(f, "Index out of bounds: {} (length: {})", idx, len)

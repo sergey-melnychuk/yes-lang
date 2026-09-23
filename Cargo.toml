@@ -12,6 +12,7 @@ documentation = "https://github.com/sergey-melnychuk/yes-lang"
 [dependencies]
 num-bigint = "0.5"
 num-traits = "0.2"
+serde = "1.0.229"
 serde_json = { version = "1.0.151", features = ["arbitrary_precision"] }
 sha3 = "0.12.0"
 

@@ -11,6 +11,64 @@ use crate::compile::Block;
 use crate::error::{Error, EvalError};
 use crate::json::IntoObject;
 use crate::parser::{Expression, Literal, Operator, Statement};
+use crate::token::Pos;
+
+/// Bytes that share their buffer: copying them or taking a slice does not copy the bytes.
+#[derive(Clone)]
+pub struct Bytes {
+    data: Rc<[u8]>,
+    start: usize,
+    end: usize,
+}
+
+impl Bytes {
+    /// A slice of these bytes, `start..end` must be within them.
+    pub fn slice(&self, start: usize, end: usize) -> Bytes {
+        assert!(start <= end && end <= self.len(), "slice out of bounds");
+        Bytes {
+            data: self.data.clone(),
+            start: self.start + start,
+            end: self.start + end,
+        }
+    }
+}
+
+impl From<Rc<[u8]>> for Bytes {
+    fn from(data: Rc<[u8]>) -> Self {
+        let end = data.len();
+        Bytes {
+            data,
+            start: 0,
+            end,
+        }
+    }
+}
+
+impl From<Vec<u8>> for Bytes {
+    fn from(data: Vec<u8>) -> Self {
+        Rc::<[u8]>::from(data).into()
+    }
+}
+
+impl std::ops::Deref for Bytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.data[self.start..self.end]
+    }
+}
+
+impl PartialEq for Bytes {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Debug for Bytes {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
+    }
+}
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Object {
@@ -19,7 +77,7 @@ pub enum Object {
     Float(f64),
     Bool(bool),
     Str(String),
-    Bytes(Vec<u8>),
+    Bytes(Bytes),
     List(Rc<Vec<Object>>),
     Record(Rc<BTreeMap<String, Object>>),
     Func(Rc<Function>),
@@ -93,7 +151,7 @@ impl From<&Literal> for Object {
             Literal::Float(x) => Object::Float(*x),
             Literal::Bool(x) => Object::Bool(*x),
             Literal::Str(x) => Object::Str(x.clone()),
-            Literal::Bytes(x) => Object::Bytes(x.clone()),
+            Literal::Bytes(x) => Object::Bytes(x.clone().into()),
         }
     }
 }
@@ -290,7 +348,7 @@ fn exec_stmt(stmt: &Statement, ctx: &Context) -> Result<Flow, EvalError> {
             match cond {
                 Object::Bool(true) => exec_block(if_clause, &ctx.fork()),
                 Object::Bool(false) => exec_block(else_clause, &ctx.fork()),
-                obj => Err(EvalError::NotBoolean(obj)),
+                obj => Err(at(EvalError::NotBoolean(obj), expr.position())),
             }
         }
 
@@ -302,6 +360,13 @@ fn exec_stmt(stmt: &Statement, ctx: &Context) -> Result<Flow, EvalError> {
         }
 
         Statement::Expr(expr) => Ok(Flow::Next(eval_expr(expr, ctx)?)),
+    }
+}
+
+pub(crate) fn at(e: EvalError, pos: Option<Pos>) -> EvalError {
+    match pos {
+        Some(pos) => e.at(pos),
+        None => e,
     }
 }
 
@@ -323,6 +388,8 @@ pub(crate) fn lookup(ctx: &Context, name: &str) -> Result<Object, EvalError> {
 
 fn eval_expr(expr: &Expression, ctx: &Context) -> Result<Object, EvalError> {
     match expr {
+        Expression::At(pos, expr) => eval_expr(expr, ctx).map_err(|e| e.at(*pos)),
+
         Expression::Lit(lit) => Ok(lit.into()),
 
         Expression::Var(name) => lookup(ctx, name),
@@ -377,6 +444,14 @@ fn eval_expr(expr: &Expression, ctx: &Context) -> Result<Object, EvalError> {
                 .map(|item| eval_expr(item, ctx))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Object::List(Rc::new(items)))
+        }
+
+        Expression::Record(fields) => {
+            let fields = fields
+                .iter()
+                .map(|(name, expr)| Ok((name.clone(), eval_expr(expr, ctx)?)))
+                .collect::<Result<BTreeMap<_, _>, EvalError>>()?;
+            Ok(Object::Record(Rc::new(fields)))
         }
 
         Expression::Field(target, name) => match eval_expr(target, ctx)? {
@@ -474,7 +549,9 @@ pub(crate) fn eval_infix(op: Operator, lhs: Object, rhs: Object) -> Result<Objec
         (Operator::Eq, Object::Bool(a), Object::Bool(b)) => Ok(Object::Bool(a == b)),
         (Operator::Ne, Object::Bool(a), Object::Bool(b)) => Ok(Object::Bool(a != b)),
 
-        (Operator::Add, Object::Bytes(a), Object::Bytes(b)) => Ok(Object::Bytes([a, b].concat())),
+        (Operator::Add, Object::Bytes(a), Object::Bytes(b)) => {
+            Ok(Object::Bytes([&a[..], &b[..]].concat().into()))
+        }
         (Operator::Eq, Object::Bytes(a), Object::Bytes(b)) => Ok(Object::Bool(a == b)),
         (Operator::Ne, Object::Bytes(a), Object::Bytes(b)) => Ok(Object::Bool(a != b)),
 
@@ -487,7 +564,7 @@ pub(crate) fn eval_infix(op: Operator, lhs: Object, rhs: Object) -> Result<Objec
         }
         (Operator::In, Object::Str(a), Object::Str(b)) => Ok(Object::Bool(b.contains(&a))),
         (Operator::In, Object::Bytes(a), Object::Bytes(b)) => Ok(Object::Bool(
-            a.is_empty() || b.windows(a.len()).any(|w| w == a.as_slice()),
+            a.is_empty() || b.windows(a.len()).any(|w| w == &a[..]),
         )),
         (Operator::In, Object::Str(name), Object::Record(fields)) => {
             Ok(Object::Bool(fields.contains_key(&name)))
@@ -600,7 +677,7 @@ pub(crate) fn eval_slice(
     match target {
         Object::Bytes(b) => {
             let (start, end) = clamp_range(start, end, b.len());
-            Ok(Object::Bytes(b[start..end].to_vec()))
+            Ok(Object::Bytes(b.slice(start, end)))
         }
         Object::Str(s) => {
             let chars: Vec<char> = s.chars().collect();
@@ -621,7 +698,7 @@ mod tests {
     use crate::buffer::Buffer;
     use crate::compile::Program;
     use crate::lexer::tokenize;
-    use crate::parser::parse;
+    use crate::parser::{parse, strip, Input};
     use crate::tests::LIMITS;
     use crate::with_stack;
 
@@ -637,11 +714,11 @@ mod tests {
         Object::Str(s.to_string())
     }
 
+    // without positions, so that errors can be compared as they are
     fn parse_line(line: &str) -> Vec<Statement> {
         let buf = Buffer::from_string(line);
         let tokens = tokenize(&buf).unwrap();
-        let buf = Buffer::new(tokens);
-        parse(&buf).unwrap()
+        strip(parse(&Input::new(tokens, vec![])).unwrap())
     }
 
     // runs the lines with the tree-walking interpreter and, separately, compiled into
@@ -707,7 +784,7 @@ mod tests {
             (
                 Expression::Lit(Literal::Bytes(vec![0xa9])),
                 vec![],
-                Ok(Object::Bytes(vec![0xa9])),
+                Ok(Object::Bytes(vec![0xa9].into())),
             ),
             (
                 Expression::Var("x".to_string()),
@@ -954,6 +1031,45 @@ mod tests {
     }
 
     #[test]
+    fn test_bytes_slices() {
+        let bytes: Bytes = vec![0, 1, 2, 3, 4, 5].into();
+        let slice = bytes.slice(1, 5);
+        assert_eq!(&slice[..], &[1, 2, 3, 4]);
+        // slices share the buffer, offsets of nested slices add up
+        assert!(Rc::ptr_eq(&bytes.data, &slice.data));
+        assert_eq!(&slice.slice(1, 3)[..], &[2, 3]);
+        assert_eq!(&slice.slice(4, 4)[..], &[] as &[u8]);
+        assert_eq!(slice, vec![1, 2, 3, 4].into());
+        check(vec![
+            (
+                vec!["let b = b\"00010203040506\"; b[1..6][1..4][1..] + b[..1]"],
+                Ok(Object::Bytes(vec![3, 4, 0].into())),
+            ),
+            (vec!["b\"000102\"[1..][0]"], Ok(int(1))),
+            (
+                vec!["b\"0102\" in b\"000102\"[1..]"],
+                Ok(Object::Bool(true)),
+            ),
+        ]);
+    }
+
+    #[test]
+    fn test_records() {
+        fn t(src: &str) -> (Vec<&str>, Result<Object, EvalError>) {
+            (vec![src], Ok(Object::Bool(true)))
+        }
+        check(vec![
+            t("{} == {} && len({}) == 0"),
+            t("let r = {a: 1, \"b c\": [2], nested: {x: b\"ff\"}}; r.a == 1 && r[\"b c\"][0] == 2 && r.nested.x == b\"ff\""),
+            t("{a: 1, b: 2} == {b: 2, a: 1} && {a: 1} != {a: 2} && {a: 1} != {b: 1}"),
+            t("\"a\" in {a: null} && {a: 1}.nope == null && len({a: 1, b: 2}) == 2"),
+            t("let x = 5; fn f(n) { {n: n, twice: n * 2} } f(x).twice == 10"),
+            t("{to: b\"01\"} in [{to: b\"00\"}, {to: b\"01\"}]"),
+            (vec!["{a: undefined}"], Err(EvalError::NotFound("undefined".to_string()))),
+        ]);
+    }
+
+    #[test]
     fn test_builtins() {
         fn t(src: &str) -> (Vec<&str>, Result<Object, EvalError>) {
             (vec![src], Ok(Object::Bool(true)))
@@ -976,9 +1092,9 @@ mod tests {
             (vec!["int(\"abc\")"], Err(EvalError::Argument("int", string("abc")))),
             (vec!["int(\"0x\")"], Err(EvalError::Argument("int", string("0x")))),
             // an odd number of digits is padded, like in JSON
-            (vec!["bytes(\"0xabc\")"], Ok(Object::Bytes(vec![0x0a, 0xbc]))),
+            (vec!["bytes(\"0xabc\")"], Ok(Object::Bytes(vec![0x0a, 0xbc].into()))),
             (vec!["bytes(\"0xzz\")"], Err(EvalError::Argument("bytes", string("0xzz")))),
-            (vec!["selector(b\"00\")"], Err(EvalError::Argument("selector", Object::Bytes(vec![0])))),
+            (vec!["selector(b\"00\")"], Err(EvalError::Argument("selector", Object::Bytes(vec![0].into())))),
             (vec!["len(\"a\", \"b\")"], Err(EvalError::ApplyArgsCount(1, 2))),
             (vec!["nope(1)"], Err(EvalError::NotFound("nope".to_string()))),
         ]);
@@ -1028,7 +1144,7 @@ mod tests {
             ),
             (
                 vec!["b\"ab\" + b\"cd\""],
-                Ok(Object::Bytes(vec![0xab, 0xcd])),
+                Ok(Object::Bytes(vec![0xab, 0xcd].into())),
             ),
         ]);
     }
@@ -1048,7 +1164,7 @@ mod tests {
     }
 
     fn tx() -> Object {
-        let topic = Object::Bytes(vec![0xdd, 0xf2, 0x52, 0xad]);
+        let topic = Object::Bytes(vec![0xdd, 0xf2, 0x52, 0xad].into());
         let log = vec![("topics".to_string(), Object::List(Rc::new(vec![topic])))];
         let fields = vec![
             (
@@ -1057,7 +1173,7 @@ mod tests {
             ),
             (
                 "data".to_string(),
-                Object::Bytes(vec![0xa9, 0x05, 0x9c, 0xbb, 0x00, 0x01]),
+                Object::Bytes(vec![0xa9, 0x05, 0x9c, 0xbb, 0x00, 0x01].into()),
             ),
             ("value".to_string(), big("1000000000000000000")),
             (
@@ -1079,8 +1195,8 @@ mod tests {
             ),
             ("tx[\"to\"] == tx.to", Ok(Object::Bool(true))),
             ("tx.data[0]", Ok(int(0xa9))),
-            ("tx.data[4..]", Ok(Object::Bytes(vec![0x00, 0x01]))),
-            ("tx.logs[0].topics[0][..2]", Ok(Object::Bytes(vec![0xdd, 0xf2]))),
+            ("tx.data[4..]", Ok(Object::Bytes(vec![0x00, 0x01].into()))),
+            ("tx.logs[0].topics[0][..2]", Ok(Object::Bytes(vec![0xdd, 0xf2].into()))),
             ("tx.value / 1000000000000000000", Ok(int(1))),
             ("tx.nope", Ok(Object::Null)),
             ("tx[\"nope\"] == null", Ok(Object::Bool(true))),
@@ -1092,16 +1208,16 @@ mod tests {
             (
                 "tx.data[\"x\"]",
                 Err(EvalError::Index(
-                    Object::Bytes(vec![0xa9, 0x05, 0x9c, 0xbb, 0x00, 0x01]),
+                    Object::Bytes(vec![0xa9, 0x05, 0x9c, 0xbb, 0x00, 0x01].into()),
                     string("x"),
                 )),
             ),
             ("(1).x", Err(EvalError::Field(int(1), "x".to_string()))),
             // slice bounds are clamped
             ("b\"\"[0..4] == b\"\"", Ok(Object::Bool(true))),
-            ("b\"010203\"[2..1]", Ok(Object::Bytes(vec![]))),
-            ("b\"010203\"[-5..2]", Ok(Object::Bytes(vec![1, 2]))),
-            ("b\"010203\"[1..99999999999999999999]", Ok(Object::Bytes(vec![2, 3]))),
+            ("b\"010203\"[2..1]", Ok(Object::Bytes(vec![].into()))),
+            ("b\"010203\"[-5..2]", Ok(Object::Bytes(vec![1, 2].into()))),
+            ("b\"010203\"[1..99999999999999999999]", Ok(Object::Bytes(vec![2, 3].into()))),
             ("\"hello\"[1..3]", Ok(string("el"))),
             ("\"héllo\"[1]", Ok(string("é"))),
             // any expression can be called

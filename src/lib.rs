@@ -23,14 +23,14 @@ mod token;
 pub use builtin::Builtin;
 pub use compile::Program;
 pub use error::{Error, EvalError, ParserError, TokenError};
-pub use eval::{take_warnings, Context, Function, Limits, Object};
+pub use eval::{take_warnings, Bytes, Context, Function, Limits, Object};
 pub use json::{from_json, to_json, IntoObject};
 pub use parser::Operator;
 pub use token::{is_identifier, Pos, Token};
 
 use crate::buffer::Buffer;
 use crate::lexer::tokenize_with_offsets;
-use crate::parser::{parse, Statement};
+use crate::parser::{parse, Input, Statement};
 
 /// Stack size of the thread started by `with_stack`: enough for 10k nested calls
 /// even in debug builds.
@@ -51,13 +51,9 @@ pub fn with_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 pub(crate) fn parse_source(code: &str) -> Result<Vec<Statement>, Error> {
     let tokens = tokenize_with_offsets(&Buffer::from_string(code))
         .map_err(|(e, offset)| Error::Lexer(e, Pos::of(code, offset)))?;
-    let offsets = tokens.offsets;
-    let buffer = Buffer::new(tokens.tokens);
-    parse(&buffer).map_err(|e| {
-        // the error is caused by the token the parser looked at last
-        let idx = buffer.last().min(offsets.len() - 1);
-        Error::Parser(e, Pos::of(code, offsets[idx]))
-    })
+    let input = Input::new(tokens.tokens, Pos::all(code, &tokens.offsets));
+    // the error is caused by the token the parser looked at last
+    parse(&input).map_err(|e| Error::Parser(e, input.pos()))
 }
 
 #[cfg(test)]
@@ -129,9 +125,12 @@ pub(crate) mod tests {
     #[test]
     fn test_file_errors() {
         let tests = vec![
-            ("division.yes", "Division by zero"),
-            ("recursion.yes", "Stack overflow: call depth exceeds 10000"),
-            ("scope.yes", "Not found: 'y'"),
+            ("division.yes", "Division by zero at 3:3"),
+            (
+                "recursion.yes",
+                "Stack overflow: call depth exceeds 10000 at 2:24",
+            ),
+            ("scope.yes", "Not found: 'y' at 2:10"),
             ("syntax.yes", "Unexpected 'Identifier(\"x\")' at 3:7"),
             ("string.yes", "Unterminated string at 2:9"),
             ("bytes.yes", "Invalid hex bytes: b\"a9059cb\" at 2:16"),
@@ -178,6 +177,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_runtime_error_positions() {
+        let tests = vec![
+            ("let x = 1;\nx + y", "Not found: 'y' at 2:5"),
+            ("fn f(a) {\n  a / 0\n}\nf(1)", "Division by zero at 2:5"),
+            ("if 1 { 2 }", "Expected boolean but got '1' at 1:1"),
+            (
+                "if false { 1 } else if \"x\" { 2 }",
+                "Expected boolean but got '\"x\"' at 1:21",
+            ),
+            ("[1][5]", "Index out of bounds: 5 (length: 1) at 1:4"),
+            ("{a: 1}.a.b", "Cannot access 'b' of '1' at 1:9"),
+            ("len(1)", "Invalid argument of 'len': '1' at 1:4"),
+            ("-\"a\"", "Cannot apply: (Neg, Str(\"a\")) at 1:1"),
+            ("1 && 2", "Expected boolean but got '1' at 1:3"),
+            (
+                "let f = fn(a) { a };\n  f(1, 2)",
+                "Cannot apply: expected number of arguments: 1, got: 2 at 2:4",
+            ),
+            // the innermost position: where the error happened, not where the function was called
+            (
+                "fn g(x) { x.y.z }\ng({})",
+                "Cannot access 'z' of 'null' at 1:14",
+            ),
+        ];
+        for (src, expected) in tests {
+            let program = Program::compile(src).unwrap();
+            let error = program.run(&Context::default()).unwrap_err().to_string();
+            assert_eq!(error, expected, "{}", src);
+        }
+    }
+
+    #[test]
     fn test_limits() {
         let fib = "fn fib(n) { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }";
         let program = Program::compile(&format!("{} fib(20)", fib)).unwrap();
@@ -187,7 +218,9 @@ pub(crate) mod tests {
             max_calls: Some(1000),
         };
         assert_eq!(
-            program.run_with(&ctx, limits),
+            program
+                .run_with(&ctx, limits)
+                .map_err(EvalError::without_position),
             Err(EvalError::CallLimit(1000))
         );
         // the calls are counted per run
@@ -200,7 +233,10 @@ pub(crate) mod tests {
         let program = Program::compile(&format!("{} f(999)", deep)).unwrap();
         assert_eq!(program.run(&ctx), Ok(Object::Int(0.into())));
         let program = Program::compile(&format!("{} f(1000)", deep)).unwrap();
-        assert_eq!(program.run(&ctx), Err(EvalError::StackOverflow(1000)));
+        assert_eq!(
+            program.run(&ctx).map_err(EvalError::without_position),
+            Err(EvalError::StackOverflow(1000))
+        );
     }
 }
 

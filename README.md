@@ -7,14 +7,14 @@ Simple interpreter in Rust:
 - "manual" tokenization
 - single-/multi-line comments
 - prefix & infix operators
-- Pratt parser impl, errors with line:column
+- Pratt parser impl, errors (also runtime ones) with line:column
 - tree-walking interpreter, and a compiler of the AST into closures (the one that runs)
 - lexically scoped bindings
 - functions as a first class citizens (closures, recursion)
 - arbitrary-precision integers ([num-bigint](https://crates.io/crates/num-bigint))
 - strings with escapes (`"a\"b\n"`) and raw hex bytes (`b"a9059cbb"`)
 - indexing `x[i]`, slicing `x[a..b]` (bounds are clamped), field access `x.name` / `x["name"]`
-- lists `[1, 2]`, membership `x in [1, 2]` / `"ell" in "hello"` / `"to" in tx`, `else if`
+- lists `[1, 2]`, records `{to: b"01", "any key": 2}`, membership `x in [1, 2]` / `"ell" in "hello"` / `"to" in tx`, `else if`
 - builtins: `len`, `int`, `bytes`, `keccak`, `selector`
 - JSON binding (`--bind:NAME=...`, `--stream:NAME`), `"0x..."` strings become bytes
 - lexer, parser, interpreter & REPL in <2k LoC (excluding tests)
@@ -84,6 +84,7 @@ A missing record field is `null`.
 More examples: [closures](examples/closures.yes), [return](examples/return.yes),
 [logic](examples/logic.yes), [bigint](examples/bigint.yes), [strings](examples/strings.yes),
 [bytes](examples/bytes.yes), [equality](examples/equality.yes), [lists](examples/lists.yes),
+[records](examples/records.yes),
 [erc20](examples/erc20.yes), [errors](examples/errors).
 All of them are run by `cargo test`, with both the tree-walking interpreter and the compiled closures.
 
@@ -160,8 +161,10 @@ run on a thread with a big stack (`yes_lang::with_stack`) and raise `Limits::max
 `yes_lang::to_json` converts a result back to JSON.
 
 `cargo test --release bench -- --ignored --nocapture` measures streaming on
-[block.ndjson](examples/block.ndjson): converting a transaction from JSON takes ~5µs,
-running `usdt.yes` on it ~265ns (~360ns with the tree-walking interpreter).
+[block.ndjson](examples/block.ndjson): converting a transaction from JSON takes ~3.6µs
+(JSON is deserialized directly into objects, bytes are shared, not copied, by slices and
+field access), running `usdt.yes` on it ~230ns (~390ns with the tree-walking interpreter).
+The command line tool streams ~230k transactions per second on one core.
 
 Blocks from an RPC node can be streamed in directly, e.g.:
 `cast block latest --full --json | jq -c '.transactions[]' | yes-lang usdt.yes --stream:tx`.

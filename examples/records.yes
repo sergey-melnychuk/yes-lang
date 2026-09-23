@@ -1,0 +1,23 @@
+// Record literals: {name: value, "any key": value}
+
+let USDT = b"dac17f958d2ee523a2206206994597c13d831ec7";
+
+// decodes a transfer of an ERC-20 token into a record
+fn transfer(tx) {
+  if tx.input[..4] != selector("transfer(address,uint256)") { return null; }
+  {
+    token: tx.to,
+    to: tx.input[16..36],
+    amount: int(tx.input[36..68]),
+  }
+}
+
+let t = {to: USDT, input: b"a9059cbb000000000000000000000000850e38706b9419c18c6a1312de24e2511a598db90000000000000000000000000000000000000000000000000000000001c9c380"};
+let decoded = transfer(t);
+
+
+true
+&& decoded == {token: USDT, to: b"850e38706b9419c18c6a1312de24e2511a598db9", amount: 30000000}
+&& decoded["amount"] == decoded.amount
+&& transfer({to: USDT, input: b"095ea7b3"}) == null
+&& len(decoded) == 3 && "token" in decoded && decoded.nope == null

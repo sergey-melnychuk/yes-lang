@@ -72,18 +72,18 @@ impl Builtin {
             // a "0x..." hex string is decoded, any other string is taken as UTF-8
             (Builtin::Bytes, Object::Bytes(b)) => Ok(Object::Bytes(b)),
             (Builtin::Bytes, Object::Str(s)) if s.starts_with("0x") => match parse_bytes(&s) {
-                Some(b) => Ok(Object::Bytes(b)),
+                Some(b) => Ok(Object::Bytes(b.into())),
                 None => invalid(Object::Str(s)),
             },
-            (Builtin::Bytes, Object::Str(s)) => Ok(Object::Bytes(s.into_bytes())),
+            (Builtin::Bytes, Object::Str(s)) => Ok(Object::Bytes(s.into_bytes().into())),
 
             // Keccak-256 of bytes or of a UTF-8 string
-            (Builtin::Keccak, Object::Bytes(b)) => Ok(Object::Bytes(keccak(&b))),
-            (Builtin::Keccak, Object::Str(s)) => Ok(Object::Bytes(keccak(s.as_bytes()))),
+            (Builtin::Keccak, Object::Bytes(b)) => Ok(Object::Bytes(keccak(&b).into())),
+            (Builtin::Keccak, Object::Str(s)) => Ok(Object::Bytes(keccak(s.as_bytes()).into())),
 
             // function selector: first 4 bytes of keccak of the signature
             (Builtin::Selector, Object::Str(s)) => {
-                Ok(Object::Bytes(keccak(s.as_bytes())[..4].to_vec()))
+                Ok(Object::Bytes(keccak(s.as_bytes())[..4].to_vec().into()))
             }
 
             (_, arg) => invalid(arg),
