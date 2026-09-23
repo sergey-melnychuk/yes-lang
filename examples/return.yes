@@ -1,0 +1,37 @@
+// 'return' leaves the function from any depth of nested blocks
+
+fn classify(n) {
+  if n < 0 {
+    return "negative";
+  }
+  if n > 0 {
+    if n > 100 {
+      return "huge";
+    }
+    return "positive";
+  }
+  "zero"
+}
+
+// 'return' inside a nested function only leaves that function
+fn outer() {
+  let inner = fn() { return 1; };
+  inner();
+  2
+}
+
+// search with an early exit
+fn first_divisor(n, d) {
+  if d * d > n { return n; }
+  if n % d == 0 { return d; }
+  first_divisor(n, d + 1)
+}
+
+true
+&& classify(-5) == "negative"
+&& classify(0) == "zero"
+&& classify(7) == "positive"
+&& classify(1000) == "huge"
+&& outer() == 2
+&& first_divisor(91, 2) == 7
+&& first_divisor(97, 2) == 97

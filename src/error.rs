@@ -1,22 +1,24 @@
 use std::fmt::{Display, Formatter};
-use std::num::{ParseFloatError, ParseIntError};
+
+use num_bigint::BigInt;
 
 use crate::eval::Object;
-use crate::parser::{Expression, Operator};
-use crate::token::Token;
+use crate::parser::Operator;
+use crate::token::{Pos, Token};
 
-#[allow(dead_code)]
-#[derive(Debug)]
-pub(crate) enum TokenError {
-    Eof,
+#[derive(Debug, Eq, PartialEq)]
+pub enum TokenError {
     Unexpected(String),
+    Unterminated(&'static str),
+    InvalidBytes(String),
 }
 
 impl Display for TokenError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            TokenError::Eof => write!(f, "Unexpected EOF"),
             TokenError::Unexpected(c) => write!(f, "Unexpected: '{}'", c),
+            TokenError::Unterminated(what) => write!(f, "Unterminated {}", what),
+            TokenError::InvalidBytes(hex) => write!(f, "Invalid hex bytes: b\"{}\"", hex),
         }
     }
 }
@@ -24,12 +26,12 @@ impl Display for TokenError {
 impl std::error::Error for TokenError {}
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum ParserError {
+pub enum ParserError {
     Unexpected(Token),
     Mismatch(Token, Token),
     Prefix(Token),
     Infix(Token),
-    Op(Operator, Expression),
+    InvalidLiteral(String),
 }
 
 impl Display for ParserError {
@@ -41,7 +43,7 @@ impl Display for ParserError {
             }
             ParserError::Prefix(token) => write!(f, "No prefix version of '{:?}' exists", token),
             ParserError::Infix(token) => write!(f, "No infix version of '{:?}' exists", token),
-            ParserError::Op(op, expr) => write!(f, "Cannot parse {:?} from {:?}", op, expr),
+            ParserError::InvalidLiteral(lit) => write!(f, "Invalid literal: '{}'", lit),
         }
     }
 }
@@ -49,24 +51,26 @@ impl Display for ParserError {
 impl std::error::Error for ParserError {}
 
 #[derive(Debug, PartialEq)]
-pub(crate) enum EvalError {
-    ParseInt(ParseIntError),
-    ParseFloat(ParseFloatError),
+pub enum EvalError {
     NotFound(String),
     InfixOp(Operator, Object, Object),
     PrefixOp(Operator, Object),
     NotBoolean(Object),
-    NotFunction(String),
-    Apply(Expression),
+    NotFunction(Object),
+    Argument(&'static str, Object),
     ApplyArgsCount(usize, usize),
-    InvalidLiteral(String),
+    DivisionByZero,
+    StackOverflow(usize),
+    CallLimit(u64),
+    NotJson(Object),
+    Index(Object, Object),
+    IndexOutOfBounds(BigInt, usize),
+    Field(Object, String),
 }
 
 impl Display for EvalError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            EvalError::ParseInt(e) => write!(f, "Parsing integer failed: {}", e),
-            EvalError::ParseFloat(e) => write!(f, "Parsing float failed: {}", e),
             EvalError::NotFound(name) => write!(f, "Not found: '{}'", name),
             EvalError::InfixOp(op, lhs, rhs) => {
                 write!(f, "Cannot apply: ({:?}, {:?}, {:?})", op, lhs, rhs)
@@ -74,71 +78,53 @@ impl Display for EvalError {
             EvalError::PrefixOp(op, obj) => write!(f, "Cannot apply: ({:?}, {:?})", op, obj),
             EvalError::NotBoolean(obj) => write!(f, "Expected boolean but got '{}'", obj),
             EvalError::NotFunction(obj) => write!(f, "'{}' is not a function", obj),
-            EvalError::Apply(expr) => write!(f, "Cannot apply: '{:?}'", expr),
+            EvalError::Argument(name, obj) => {
+                write!(f, "Invalid argument of '{}': '{}'", name, obj)
+            }
             EvalError::ApplyArgsCount(exp, got) => write!(
                 f,
                 "Cannot apply: expected number of arguments: {}, got: {}",
                 exp, got
             ),
-            EvalError::InvalidLiteral(lit) => write!(f, "Invalid literal: '{}'", lit),
+            EvalError::DivisionByZero => write!(f, "Division by zero"),
+            EvalError::StackOverflow(depth) => {
+                write!(f, "Stack overflow: call depth exceeds {}", depth)
+            }
+            EvalError::CallLimit(calls) => write!(f, "Call limit exceeded: {} calls", calls),
+            EvalError::NotJson(obj) => write!(f, "Cannot convert '{}' to JSON", obj),
+            EvalError::Index(obj, idx) => write!(f, "Cannot index '{}' with '{}'", obj, idx),
+            EvalError::IndexOutOfBounds(idx, len) => {
+                write!(f, "Index out of bounds: {} (length: {})", idx, len)
+            }
+            EvalError::Field(obj, name) => write!(f, "Cannot access '{}' of '{}'", name, obj),
         }
     }
 }
 
-impl std::error::Error for EvalError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            EvalError::ParseInt(e) => Some(e),
-            EvalError::ParseFloat(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<ParseIntError> for EvalError {
-    fn from(e: ParseIntError) -> Self {
-        Self::ParseInt(e)
-    }
-}
-
-impl From<ParseFloatError> for EvalError {
-    fn from(e: ParseFloatError) -> Self {
-        Self::ParseFloat(e)
-    }
-}
+impl std::error::Error for EvalError {}
 
 #[derive(Debug)]
-pub(crate) enum Error {
-    Lexer(TokenError),
-    Parser(ParserError),
+pub enum Error {
+    Lexer(TokenError, Pos),
+    Parser(ParserError, Pos),
     Eval(EvalError),
     IO(std::io::Error),
+    Json(serde_json::Error),
 }
 
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::Lexer(e) => write!(f, "{}", e),
-            Error::Parser(e) => write!(f, "{}", e),
+            Error::Lexer(e, pos) => write!(f, "{} at {}", e, pos),
+            Error::Parser(e, pos) => write!(f, "{} at {}", e, pos),
             Error::Eval(e) => write!(f, "{}", e),
             Error::IO(e) => write!(f, "{}", e),
+            Error::Json(e) => write!(f, "Invalid JSON: {}", e),
         }
     }
 }
 
 impl std::error::Error for Error {}
-
-impl From<TokenError> for Error {
-    fn from(e: TokenError) -> Self {
-        Self::Lexer(e)
-    }
-}
-
-impl From<ParserError> for Error {
-    fn from(e: ParserError) -> Self {
-        Self::Parser(e)
-    }
-}
 
 impl From<EvalError> for Error {
     fn from(e: EvalError) -> Self {
@@ -149,5 +135,11 @@ impl From<EvalError> for Error {
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Self::IO(e)
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Json(e)
     }
 }

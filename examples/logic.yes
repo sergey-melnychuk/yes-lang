@@ -1,0 +1,18 @@
+// '&&' and '||' short-circuit: the right side is evaluated only when needed,
+// so it can safely refer to undefined names or do expensive work
+
+fn boom() { 1 / 0 }
+
+// '&&' binds tighter than '||': this is 'true || (false && false)'
+let precedence = true || false && false;
+
+// short-circuit makes guards possible
+fn safe_div(a, b) { b != 0 && a / b > 1 }
+
+true
+&& (false && boom()) == false
+&& (true || boom()) == true
+&& (false && undefined_name) == false
+&& precedence
+&& !safe_div(10, 0)
+&& safe_div(10, 2)

@@ -1,0 +1,3 @@
+// statements must be separated by ';': nothing is silently ignored
+let x = 1;
+x + 1 x + 2

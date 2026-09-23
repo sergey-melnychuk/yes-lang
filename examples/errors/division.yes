@@ -1,0 +1,3 @@
+// integer division by zero is an error, not a crash
+let x = 0;
+1 / x

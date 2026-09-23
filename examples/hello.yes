@@ -6,4 +6,4 @@ line
 comment
 */
 
-hi("world")
+hi("world") == "hello world"

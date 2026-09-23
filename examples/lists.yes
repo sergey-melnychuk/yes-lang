@@ -1,0 +1,40 @@
+// List literals, the 'in' operator, 'else if' and builtin functions
+
+let STABLES = [
+  b"dac17f958d2ee523a2206206994597c13d831ec7", // USDT
+  b"a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // USDC
+  b"6b175474e89094c44da98b954eedeac495271d0f", // DAI
+];
+
+// 'in' checks: an item of a list, a substring, a byte substring, a field of a record
+let is_stable = fn(token) { token in STABLES };
+
+fn size(n) {
+  if n < 10 { "small" }
+  else if n < 1000 { "medium" }
+  else { "large" }
+}
+
+// builtins: len, int, bytes, keccak, selector
+let word = b"0000000000000000000000000000000000000000000000000de0b6b3a7640000";
+
+// sum of a list, recursively
+fn sum(xs) {
+  if xs == [] { return 0; }
+  xs[0] + sum(xs[1..])
+}
+
+true
+&& is_stable(b"a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+&& !is_stable(b"0000000000000000000000000000000000000000")
+&& 2 in [1, 2, 3] && !(4 in [1, 2, 3])
+&& "ell" in "hello"
+&& selector("transfer(address,uint256)") in b"00a9059cbb00"
+&& size(5) + size(50) + size(5000) == "smallmediumlarge"
+&& len(STABLES) == 3 && len("héllo") == 5 && len(word) == 32
+&& int(word) == 1000000000000000000 // 1 ether in wei
+&& int("0x10") == 16
+&& bytes("0xa9059cbb") == b"a9059cbb" && bytes("hi") == b"6869"
+&& keccak("Transfer(address,address,uint256)")[..4] == b"ddf252ad"
+&& sum([1, 2, 3, 4]) == 10
+&& [1, [2, 3]][1] == [2, 3]

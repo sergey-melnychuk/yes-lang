@@ -1,0 +1,25 @@
+// Integers have arbitrary precision: no overflow, ever
+
+fn pow(base, exp) {
+  if exp == 0 { return 1; }
+  base * pow(base, exp - 1)
+}
+
+fn factorial(n) {
+  if n <= 1 { return 1; }
+  n * factorial(n - 1)
+}
+
+// 1 ether in wei does not fit into 32 bits, max uint256 does not fit into 64 bits
+let ether = pow(10, 18);
+let max_uint256 = pow(2, 256) - 1;
+
+true
+&& pow(2, 64) == 18446744073709551616
+&& 9223372036854775807 + 1 == 9223372036854775808
+&& factorial(30) == 265252859812191058636308480000000
+&& max_uint256 == 115792089237316195423570985008687907853269984665640564039457584007913129639935
+&& max_uint256 % ether == 584007913129639935
+&& 3 * ether / 2 == 1500000000000000000
+&& -7 / 2 == -3 && -7 % 2 == -1  // division truncates towards zero
+&& 1 / 2.0 == 0.5                // mixing with floats gives a float

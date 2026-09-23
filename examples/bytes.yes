@@ -1,0 +1,19 @@
+// b"..." is a raw hex bytes literal, '0x' prefix and upper-case digits are allowed
+
+// calldata of ERC-20 transfer(address,uint256)
+let data = b"a9059cbb000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec70000000000000000000000000000000000000000000000000de0b6b3a7640000";
+
+let transfer = b"0xA9059CBB";
+let selector = data[0..4];
+let recipient = data[16..36];
+
+fn is_transfer(calldata) { calldata[..4] == transfer }
+
+true
+&& selector == b"a9059cbb"
+&& recipient == b"dac17f958d2ee523a2206206994597c13d831ec7"
+&& data[0] == 169            // indexing a byte gives an integer
+&& is_transfer(data)
+&& !is_transfer(b"")         // slice bounds are clamped: b""[..4] == b""
+&& b"dead" + b"beef" == b"deadbeef"
+&& (b"deadbeef")[2..] != b"dead"

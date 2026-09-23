@@ -1,0 +1,2 @@
+// unterminated string literal
+let s = "hello;

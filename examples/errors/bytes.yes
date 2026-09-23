@@ -1,0 +1,2 @@
+// hex bytes must have an even number of hex digits
+let selector = b"a9059cb";

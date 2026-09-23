@@ -1,0 +1,18 @@
+// Strings support escapes, indexing and slicing (by characters, not bytes)
+
+let quote = "she said \"hi\"";
+let path = "C:\\temp";
+let lines = "a\nb";
+let word = "héllo";
+
+true
+&& quote[9..13] == "\"hi\""
+&& path[2] == "\\"
+&& lines[1] == "\n"
+&& word[1] == "é"
+&& word[1..3] == "él"
+&& word[..2] + word[3..] == "hélo"
+&& word[..] == word
+&& word[3..100] == "lo"   // slice bounds are clamped
+&& word[4..1] == ""       // an empty range gives an empty string
+&& "abc" < "abd"

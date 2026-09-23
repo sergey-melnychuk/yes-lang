@@ -1,0 +1,7 @@
+// 'f' is defined at the top level and does not see 'y' from its caller 'g'
+fn f() { y }
+fn g() {
+  let y = 5;
+  f()
+}
+g()

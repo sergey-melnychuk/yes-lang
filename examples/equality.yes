@@ -1,0 +1,17 @@
+// Any two values can be compared with '==' and '!=':
+// values of different types are never equal (an apple is never equal to an orange)
+// Such comparisons print a warning (once per pair of types), except comparisons with null
+
+fn nothing() {}   // a function without a result returns null
+
+// 'null' is also the value of a missing record field, e.g. 'tx.to' of a contract creation,
+// so a predicate can check for it before comparing: tx.to != null && tx.to == "0x..."
+fn is_zero(x) { x == 0 }
+
+true
+&& nothing() == null
+&& null != false && null != 0 && null != ""
+&& 1 == 1.0                  // numbers are compared by value
+&& !is_zero("0")             // Warning: Comparing Str with Int is always false
+&& b"00" != "00"             // Warning: Comparing Bytes with Str is always true
+&& is_zero(0)

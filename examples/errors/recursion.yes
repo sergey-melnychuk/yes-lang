@@ -1,0 +1,3 @@
+// unbounded recursion stops at the call depth limit instead of overflowing the stack
+fn forever(n) { forever(n + 1) }
+forever(0)

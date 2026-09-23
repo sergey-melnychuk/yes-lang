@@ -1,0 +1,10 @@
+// A predicate to select USDT transfers from a stream of transactions (one JSON per line),
+// each transaction is bound to 'tx':
+//   cargo run -q -- examples/usdt.yes --stream:tx < examples/block.ndjson
+// or for a single transaction:
+//   cargo run -q -- examples/usdt.yes --bind:tx=@examples/tx.json
+//
+// examples/block.ndjson: the first 30 transactions of mainnet block 26040477
+
+tx.to == b"dac17f958d2ee523a2206206994597c13d831ec7"
+&& tx.input[..4] == selector("transfer(address,uint256)")

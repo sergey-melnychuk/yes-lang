@@ -1,0 +1,43 @@
+// Functions capture the scope they are defined in (lexical scoping)
+
+fn adder(n) {
+  fn(x) { x + n }
+}
+
+let add1 = adder(1);
+let add10 = adder(10);
+
+// each closure keeps its own captured 'n'
+fn compose(f, g) {
+  fn(x) { g(f(x)) }
+}
+
+// functions may call functions defined later in the same scope
+fn is_even(n) { if n == 0 { true } else { is_odd(n - 1) } }
+fn is_odd(n) { if n == 0 { false } else { is_even(n - 1) } }
+
+// a callee does not see the caller's bindings: 'secret' below is not visible in 'peek'
+let secret = "global";
+fn peek() { secret }
+fn shadow() {
+  let secret = "local";
+  peek()
+}
+
+// 'if' branches have their own scope
+let y = 1;
+if true { let y = 2; }
+
+// anything that evaluates to a function can be called
+let twice = fn(f) { fn(x) { f(f(x)) } };
+
+true
+&& add1(1) == 2
+&& add10(1) == 11
+&& compose(add1, add10)(0) == 11
+&& is_even(10) && is_odd(7)
+&& shadow() == "global"
+&& y == 1
+&& (add1)(0) == 1
+&& twice(add10)(1) == 21
+&& (fn(a, b) { a * b })(6, 7) == 42
