@@ -15,7 +15,7 @@ use crate::eval::{
     CallDepthGuard, Context, Flow, Function, Limits, Object, at, eval, eval_eq, eval_index,
     eval_infix, eval_prefix, eval_slice, get_field, lookup, run_collecting,
 };
-use crate::parser::{Expression, Operator, Statement};
+use crate::parser::{BlockScope, Expression, Operator, Statement, defines_functions};
 
 type Expr = Box<dyn Fn(&Context) -> Result<Object, EvalError>>;
 type Stmt = Box<dyn Fn(&Context) -> Result<Flow, EvalError>>;
@@ -119,15 +119,10 @@ fn compile_stmt(stmt: &Statement) -> Stmt {
         Statement::If(cond, if_clause, else_clause) => {
             let pos = cond.position();
             let cond = compile_expr(cond);
-            let if_clause = compile_block(if_clause);
-            let else_clause = compile_block(else_clause);
-            // an empty branch needs no scope of its own
-            let run = |block: &Block, ctx: &Context| {
-                if block.is_empty() {
-                    Ok(Flow::Next(Object::Null))
-                } else {
-                    run_block(block, &ctx.fork())
-                }
+            let if_clause = (BlockScope::of(if_clause), compile_block(if_clause));
+            let else_clause = (BlockScope::of(else_clause), compile_block(else_clause));
+            let run = |(scope, block): &(BlockScope, Block), ctx: &Context| {
+                ctx.scoped(*scope, |ctx| run_block(block, ctx))
             };
             Box::new(move |ctx| match cond(ctx)? {
                 Object::Bool(true) => run(&if_clause, ctx),
@@ -158,11 +153,13 @@ fn compile_fn(params: &[String], body: &[Statement]) -> impl Fn(&Context) -> Obj
     let params = Rc::new(params.to_vec());
     let ast = Rc::new(body.to_vec());
     let code = Rc::new(compile_block(body));
+    let captures = defines_functions(body);
     move |ctx| {
         Object::Func(Rc::new(Function {
             params: params.clone(),
             body: ast.clone(),
             code: Some(code.clone()),
+            captures,
             env: ctx.clone(),
         }))
     }
@@ -346,7 +343,7 @@ fn call(callee: Object, args: &[Expr], ctx: &Context) -> Result<Object, EvalErro
                 return Err(EvalError::ApplyArgsCount(f.params.len(), args.len()));
             }
             // arguments are evaluated in the caller's scope, the body - in the defining one
-            let fn_ctx = f.env.fork();
+            let fn_ctx = f.env.child(f.captures);
             for (name, arg) in f.params.iter().zip(args.iter()) {
                 fn_ctx.put(name.clone(), arg(ctx)?);
             }
@@ -365,7 +362,7 @@ fn call_value(f: &Object, args: Vec<Object>) -> Result<Object, EvalError> {
             if f.params.len() != args.len() {
                 return Err(EvalError::ApplyArgsCount(f.params.len(), args.len()));
             }
-            let fn_ctx = f.env.fork();
+            let fn_ctx = f.env.child(f.captures);
             for (name, obj) in f.params.iter().zip(args) {
                 fn_ctx.put(name.clone(), obj);
             }

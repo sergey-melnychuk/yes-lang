@@ -100,6 +100,68 @@ impl Expression {
     }
 }
 
+/// The scope a block needs to run in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlockScope {
+    /// No scope of its own: the block binds nothing ('let', 'fn').
+    None,
+    /// A scope no closure can capture, so it cannot be a part of a cycle.
+    Untracked,
+    /// A scope that closures created in the block can capture (see 'eval::track').
+    Tracked,
+}
+
+impl BlockScope {
+    pub(crate) fn of(statements: &[Statement]) -> Self {
+        if defines_functions(statements) {
+            BlockScope::Tracked
+        } else if statements
+            .iter()
+            .any(|stmt| matches!(stmt, Statement::Let(..) | Statement::Fn(..)))
+        {
+            BlockScope::Untracked
+        } else {
+            BlockScope::None
+        }
+    }
+}
+
+/// Whether the statements create functions (at any depth): only then a scope in which they
+/// run can be captured by a closure.
+pub(crate) fn defines_functions(statements: &[Statement]) -> bool {
+    statements.iter().any(|stmt| match stmt {
+        Statement::Fn(..) => true,
+        Statement::Let(_, expr) | Statement::Ret(expr) | Statement::Expr(expr) => {
+            creates_functions(expr)
+        }
+        Statement::If(cond, a, b) => {
+            creates_functions(cond) || defines_functions(a) || defines_functions(b)
+        }
+    })
+}
+
+fn creates_functions(expr: &Expression) -> bool {
+    let any = |exprs: &[Expression]| exprs.iter().any(creates_functions);
+    match expr {
+        Expression::Fn(..) => true,
+        Expression::Var(_) | Expression::Lit(_) => false,
+        Expression::At(_, expr) | Expression::Prefix(_, expr) | Expression::Field(expr, _) => {
+            creates_functions(expr)
+        }
+        Expression::Infix(a, _, b) | Expression::Index(a, b) => {
+            creates_functions(a) || creates_functions(b)
+        }
+        Expression::Apply(f, args) => creates_functions(f) || any(args),
+        Expression::Slice(target, start, end) => {
+            creates_functions(target)
+                || start.as_deref().is_some_and(creates_functions)
+                || end.as_deref().is_some_and(creates_functions)
+        }
+        Expression::List(items) => any(items),
+        Expression::Record(fields) => fields.iter().any(|(_, expr)| creates_functions(expr)),
+    }
+}
+
 fn at(pos: Pos, expr: Expression) -> Expression {
     Expression::At(pos, Box::new(expr))
 }
@@ -1066,6 +1128,34 @@ mod tests {
             let parsed = parse(&Input::new(tokens, vec![])).map(strip);
 
             assert_eq!(parsed, expected, "src=\"{}\"", src);
+        }
+    }
+
+    #[test]
+    fn test_block_scope() {
+        let scope = |src: &str| {
+            let tokens = tokenize(&Buffer::from_string(src)).unwrap();
+            BlockScope::of(&parse(&Input::new(tokens, vec![])).unwrap())
+        };
+        assert_eq!(scope("1 + 2; f(x)[0].y"), BlockScope::None);
+        assert_eq!(
+            scope("if a { let x = 1; } else { fn() { 1 } }"),
+            BlockScope::Tracked
+        );
+        assert_eq!(scope("if a { let x = 1; }"), BlockScope::None);
+        assert_eq!(scope("let x = 1;"), BlockScope::Untracked);
+        assert_eq!(scope("fn f() {}"), BlockScope::Tracked);
+        // a function anywhere in an expression
+        for src in [
+            "let x = [1, fn() {}];",
+            "let x = {a: fn() {}};",
+            "x[..fn() {}()]",
+            "f(g(fn() {}))",
+            "-(fn() { 1 })()",
+            "if fn() { true }() {}",
+            "return x.y == fn() {};",
+        ] {
+            assert_eq!(scope(src), BlockScope::Tracked, "{}", src);
         }
     }
 

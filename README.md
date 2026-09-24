@@ -141,7 +141,8 @@ Other bindings are visible to the program, e.g.
 An error on a line is reported and the stream goes on.
 
 Limits: `--max-depth:N` of nested calls (default 10000), `--max-calls:N` per run (per line
-of a stream, no limit by default), so that a program from somebody else cannot hang the tool.
+of a stream: 1000000 by default, no limit for a single run), so that a program from somebody
+else cannot hang the tool: without loops, calls bound both the time and the memory of a run.
 Neither deep recursion nor deeply nested code can overflow the stack: it grows on the heap as
 needed ([stacker](https://crates.io/crates/stacker)), and nesting is limited to 200 levels.
 

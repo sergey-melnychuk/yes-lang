@@ -16,7 +16,8 @@ options:
   --bind:NAME=JSON               bind JSON (converted to records, lists, ...) to NAME
   --bind:NAME=@PATH              bind JSON from the file at PATH to NAME
   --count                        (stream) print the number of outputs instead of them
-  --max-calls:N                  stop a run after N function calls (default: no limit)
+  --max-calls:N                  stop a run after N function calls (default: no limit,
+                                 1000000 per line of a stream)
   --max-depth:N                  stop a run at N nested calls (default: 10000)
   --debug                        (REPL) print AST and scope after each line
 
@@ -27,6 +28,10 @@ REPL commands:
   :load PATH                     run the file at PATH
   :bind NAME=JSON, :bind NAME=@PATH
   :q                             quit";
+
+/// Calls per line of a stream, unless '--max-calls:N' is given: a stream is often filtered by
+/// a program from somebody else, and without loops, calls bound both its time and memory.
+const STREAM_MAX_CALLS: u64 = 1_000_000;
 
 const OK: u8 = 0;
 const FALSE: u8 = 1;
@@ -184,6 +189,13 @@ fn apply(
     })
 }
 
+fn stream_limits(options: &Options) -> Limits {
+    Limits {
+        max_calls: options.limits.max_calls.or(Some(STREAM_MAX_CALLS)),
+        ..options.limits
+    }
+}
+
 // the program is compiled once and applied to each line of stdin
 fn run_stream(program: &Program, ctx: &Context, name: &str, options: &Options) -> u8 {
     let mut out = io::BufWriter::new(io::stdout().lock());
@@ -199,7 +211,7 @@ fn run_stream(program: &Program, ctx: &Context, name: &str, options: &Options) -
         if line.trim().is_empty() {
             continue;
         }
-        match apply(program, ctx, name, &line, options.limits) {
+        match apply(program, ctx, name, &line, stream_limits(options)) {
             Ok(Some(output)) => {
                 outputs += 1;
                 if !options.count && writeln!(out, "{}", output).is_err() {
@@ -460,6 +472,28 @@ mod tests {
                 .is_none()
         );
         assert_eq!(ctx.get("tx"), None);
+    }
+
+    #[test]
+    fn test_stream_limits() {
+        let args =
+            |args: &[&str]| parse_args(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
+        let options = args(&["f.yes", "--stream:x"]).unwrap();
+        assert_eq!(stream_limits(&options).max_calls, Some(STREAM_MAX_CALLS));
+        // not for a single run
+        assert_eq!(options.limits.max_calls, None);
+        let options = args(&["f.yes", "--stream:x", "--max-calls:5"]).unwrap();
+        assert_eq!(stream_limits(&options).max_calls, Some(5));
+        // an exponential program is stopped on each line
+        let fib = program("fn fib(n) { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } } fib(x.n)");
+        let limits = stream_limits(&args(&["f.yes", "--stream:x"]).unwrap());
+        match apply(&fib, &Context::default(), "x", r#"{"n": 40}"#, limits) {
+            Err(Error::Eval(e)) => {
+                assert_eq!(e.without_position(), EvalError::CallLimit(STREAM_MAX_CALLS))
+            }
+            result => panic!("unexpected: {:?}", result),
+        }
+        assert!(apply(&fib, &Context::default(), "x", r#"{"n": 10}"#, limits).is_ok());
     }
 
     #[test]

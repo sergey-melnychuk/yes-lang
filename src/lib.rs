@@ -285,6 +285,9 @@ pub(crate) mod tests {
             "fn even(n) { if n == 0 { true } else { odd(n - 1) } } fn odd(n) { if n == 0 { false } else { even(n - 1) } } even(20)",
             // errors in the middle of a run
             "fn f() { fn g() { 1 / 0 } g() } f()",
+            // closures passed through (and returned from) calls that create no functions
+            "fn apply(f, x) { f(x) } fn keep(f) { [f] } apply(fn(x) { x }, 1) + keep(fn() { 2 })[0]()",
+            "if true { let y = 1; let f = fn() { y }; f() }",
         ];
         let base = Context::default();
         base.bind("tx", r#"{"to": "0x01"}"#).unwrap();
@@ -297,6 +300,28 @@ pub(crate) mod tests {
             }
             assert_eq!(eval::live_scopes(), live, "scopes leak: {}", src);
         }
+    }
+
+    #[test]
+    fn test_only_capturable_scopes_are_tracked() {
+        let tracked = |src: &str| {
+            let program = Program::compile(src).unwrap();
+            let before = eval::tracked_scopes();
+            program.run_with(&Context::default(), LIMITS).unwrap();
+            eval::tracked_scopes() - before
+        };
+        // calls and blocks that create no functions: freed as soon as they are done
+        let sum = "fn add(a, b) { let c = a + b; c } fn sum(n) { if n == 0 { 0 } else { let m = n - 1; add(n, sum(m)) } }";
+        assert_eq!(tracked(&format!("{} sum(100)", sum)), 0);
+        assert_eq!(tracked("fn f(x) { x } map([1, 2, 3], f)"), 0);
+        // a call that creates a function: each of its scopes can be captured
+        assert_eq!(
+            tracked("fn adder(n) { fn(x) { x + n } } adder(1)(2) + adder(3)(4)"),
+            2
+        );
+        // a block that defines a function, blocks that bind nothing get no scope at all
+        assert_eq!(tracked("if true { fn g() { 1 } g() } else { 0 }"), 1);
+        assert_eq!(tracked("if true { if true { 1 } }"), 0);
     }
 
     #[test]

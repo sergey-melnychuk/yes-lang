@@ -1,6 +1,32 @@
 Notes & ideas
 =============
 
+### Memory: reference counting and cycles (2026-09-24)
+
+Values and scopes are reference-counted (`Rc`). A function keeps the scope it was defined
+in, and a named function is bound in that very scope (`fn f() {}` puts `f` into the scope
+`f` keeps), so reference counting alone never frees them: a cycle.
+
+Now: the scopes created during a run are tracked, and at the end of the run, those that
+neither the result nor the kept context (`Program::run`) reach are cleared, which breaks
+the cycles (`eval::run_collecting`). Only scopes that a closure can capture are tracked:
+calls of functions and blocks that create no functions (checked once, statically) cannot be
+a part of a cycle and are freed as soon as they are done; blocks that bind nothing get no
+scope at all. The garbage of a run is freed only at its end, but without loops it is bounded
+by the calls of the run (`Limits::max_calls`, 1M per line of a stream by default).
+
+Later, if the language gets loops or long-running scripts, garbage could grow without calls
+and a run could last forever. Then a real collector is needed, collecting during a run:
+- roots are then also the values the interpreter holds while evaluating (arguments being
+  evaluated, a list being built, the function `map` is calling), not only the result;
+- scopes in an arena (indices instead of `Rc`), with mark & sweep when the arena grows by
+  some factor since the last collection; values reference scopes by index;
+- the roots: the scopes of the active calls (a shadow stack, pushed and popped around calls
+  and blocks), plus the temporaries, e.g. registered in a "handle scope" during a call,
+  like in V8, or evaluation redesigned around an explicit value stack (a bytecode VM),
+  where the roots are simply the stack;
+- the latter comes naturally with a bytecode VM, which would also be the next step for speed.
+
 ### ZK-provable predicates (2026-09-23)
 
 Idea: a yes-lang predicate over a tx (`tx.to == ... && tx.data[0..4] == b"..."`) is a pure,

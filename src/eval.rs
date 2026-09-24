@@ -10,7 +10,7 @@ use crate::builtin::Builtin;
 use crate::compile::Block;
 use crate::error::{Error, EvalError};
 use crate::json::IntoObject;
-use crate::parser::{Expression, Literal, Operator, Statement};
+use crate::parser::{BlockScope, Expression, Literal, Operator, Statement, defines_functions};
 use crate::token::Pos;
 
 /// Bytes that share their buffer: copying them or taking a slice does not copy the bytes.
@@ -169,6 +169,8 @@ pub struct Function {
     pub(crate) body: Rc<Vec<Statement>>,
     // the body compiled into closures, when the function was created by compiled code
     pub(crate) code: Option<Rc<Block>>,
+    // whether the body creates functions, which can capture the scope of a call
+    pub(crate) captures: bool,
     // the scope the function was defined in (lexical scoping)
     pub(crate) env: Context,
 }
@@ -225,9 +227,26 @@ impl Debug for Context {
 impl Context {
     /// A new scope inside this one: bindings of the new scope are not visible here.
     pub fn fork(&self) -> Self {
+        self.child(true)
+    }
+
+    /// A new scope inside this one, tracked for cycles (see `track`) only if closures can
+    /// capture it: otherwise it is freed as soon as it is not used.
+    pub(crate) fn child(&self, tracked: bool) -> Self {
         let scope = Scope::new(Some(self.clone()));
-        track(&scope);
+        if tracked {
+            track(&scope);
+        }
         Self(scope)
+    }
+
+    /// Runs `block` in the scope it needs.
+    pub(crate) fn scoped<T>(&self, scope: BlockScope, block: impl FnOnce(&Context) -> T) -> T {
+        match scope {
+            BlockScope::None => block(self),
+            BlockScope::Untracked => block(&self.child(false)),
+            BlockScope::Tracked => block(&self.child(true)),
+        }
     }
 
     /// Binds a value to a name: JSON text, a `serde_json::Value` or an object, e.g.
@@ -346,6 +365,8 @@ thread_local! {
 }
 
 fn track(scope: &ScopeRef) {
+    #[cfg(test)]
+    TRACKED_SCOPES.with(|n| n.set(n.get() + 1));
     RUN_SCOPES.with(|scopes| {
         if let Some(scopes) = scopes.borrow_mut().as_mut() {
             // a weak pointer keeps the memory of a freed scope, forget those from time to time
@@ -453,6 +474,13 @@ impl Marker<'_> {
 #[cfg(test)]
 thread_local! {
     static LIVE_SCOPES: Cell<usize> = const { Cell::new(0) };
+    static TRACKED_SCOPES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The number of scopes tracked for cycles on this thread so far.
+#[cfg(test)]
+pub(crate) fn tracked_scopes() -> usize {
+    TRACKED_SCOPES.with(|n| n.get())
 }
 
 /// The number of scopes alive on this thread, to test that they are freed.
@@ -514,9 +542,12 @@ fn exec_stmt(stmt: &Statement, ctx: &Context) -> Result<Flow, EvalError> {
 
         Statement::If(expr, if_clause, else_clause) => {
             let cond = eval_expr(expr, ctx)?;
+            let run = |block: &[Statement]| {
+                ctx.scoped(BlockScope::of(block), |ctx| exec_block(block, ctx))
+            };
             match cond {
-                Object::Bool(true) => exec_block(if_clause, &ctx.fork()),
-                Object::Bool(false) => exec_block(else_clause, &ctx.fork()),
+                Object::Bool(true) => run(if_clause),
+                Object::Bool(false) => run(else_clause),
                 obj => Err(at(EvalError::NotBoolean(obj), expr.position())),
             }
         }
@@ -544,6 +575,7 @@ fn make_fn(params: &[String], body: &[Statement], ctx: &Context) -> Object {
         params: Rc::new(params.to_owned()),
         body: Rc::new(body.to_owned()),
         code: None,
+        captures: defines_functions(body),
         env: ctx.clone(),
     }))
 }
@@ -780,7 +812,7 @@ fn eval_fn(f: &Function, args: &[Expression], ctx: &Context) -> Result<Object, E
     }
 
     // arguments are evaluated in the caller's scope, the body - in the defining one
-    let fn_ctx = f.env.fork();
+    let fn_ctx = f.env.child(f.captures);
     for (name, expr) in f.params.iter().zip(args.iter()) {
         let obj = eval_expr(expr, ctx)?;
         fn_ctx.put(name.clone(), obj);
@@ -797,7 +829,7 @@ fn call_value(f: &Object, args: Vec<Object>) -> Result<Object, EvalError> {
             if f.params.len() != args.len() {
                 return Err(EvalError::ApplyArgsCount(f.params.len(), args.len()));
             }
-            let fn_ctx = f.env.fork();
+            let fn_ctx = f.env.child(f.captures);
             for (name, obj) in f.params.iter().zip(args) {
                 fn_ctx.put(name.clone(), obj);
             }
