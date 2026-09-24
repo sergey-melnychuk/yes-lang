@@ -23,28 +23,24 @@ mod token;
 pub use builtin::Builtin;
 pub use compile::Program;
 pub use error::{Error, EvalError, ParserError, TokenError};
-pub use eval::{take_warnings, Bytes, Context, Function, Limits, Object};
-pub use json::{from_json, to_json, IntoObject};
+pub use eval::{Bytes, Context, Function, Limits, Object, take_warnings};
+pub use json::{IntoObject, from_json, to_json};
 pub use parser::Operator;
-pub use token::{is_identifier, Pos, Token};
+pub use token::{Pos, Token, is_identifier};
 
 use crate::buffer::Buffer;
 use crate::lexer::tokenize_with_offsets;
-use crate::parser::{parse, Input, Statement};
+use crate::parser::{Input, Statement, parse};
 
-/// Stack size of the thread started by `with_stack`: enough for 10k nested calls
-/// even in debug builds.
-pub const STACK_SIZE: usize = 1 << 30;
+// more than a single level of recursion takes, even in debug builds
+const RED_ZONE: usize = 128 * 1024;
+const STACK_SEGMENT: usize = 2 * 1024 * 1024;
 
-/// Runs `f` on a new thread with a stack of `STACK_SIZE` bytes, for programs that
-/// need more nested calls than the default `Limits` allow.
-pub fn with_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    std::thread::Builder::new()
-        .stack_size(STACK_SIZE)
-        .spawn(f)
-        .expect("failed to spawn interpreter thread")
-        .join()
-        .expect("interpreter thread panicked")
+/// Runs `f`, on a new stack segment if the current stack is almost used up. Called at
+/// each level of recursion (parsing, compiling and running nested code), so that a
+/// deeply nested or recursive program cannot overflow the stack of its host thread.
+pub(crate) fn grow<R>(f: impl FnOnce() -> R) -> R {
+    stacker::maybe_grow(RED_ZONE, STACK_SEGMENT, f)
 }
 
 /// Tokenizes and parses the source, errors point at their line and column.
@@ -62,7 +58,6 @@ pub(crate) mod tests {
     use crate::eval::{eval, with_limits};
     use std::path::Path;
 
-    /// Limits of the command line tool, which runs programs on a thread from `with_stack`.
     pub(crate) const LIMITS: Limits = Limits {
         max_depth: 10_000,
         max_calls: None,
@@ -85,7 +80,16 @@ pub(crate) mod tests {
             .collect()
     }
 
-    // every example must evaluate to 'true', with the bindings it declares in its comments
+    // the result an example declares with '// expect: JSON', 'true' by default
+    fn expected_result(src: &str) -> serde_json::Value {
+        src.lines()
+            .find_map(|line| line.trim_start().strip_prefix("// expect:"))
+            .map(|json| serde_json::from_str(json).unwrap())
+            .unwrap_or(serde_json::Value::Bool(true))
+    }
+
+    // every example must evaluate to its expected result (see above), with the bindings
+    // it declares in its comments
     #[test]
     fn test_examples() {
         let mut files: Vec<_> = std::fs::read_dir("examples")
@@ -98,7 +102,7 @@ pub(crate) mod tests {
 
         for file in files {
             let name = file.display().to_string();
-            let result = with_stack(move || {
+            let result = {
                 let src = read(&file);
                 let ctx = Context::default();
                 for (name, value) in declared_binds(&src) {
@@ -108,17 +112,22 @@ pub(crate) mod tests {
                     };
                     ctx.bind(&name, json).unwrap();
                 }
-                // both the tree-walking interpreter and compiled closures are run;
-                // 'Object' cannot leave the thread, so the results are returned as text
+                // both the tree-walking interpreter and compiled closures are run
                 let ast = parse_source(&src).unwrap();
-                let text = |result: Result<Object, EvalError>| format!("{:?}", result);
+                let json = |result: Result<Object, EvalError>| {
+                    result
+                        .and_then(|obj| to_json(&obj))
+                        .map(|json| json.to_string())
+                        .map_err(|e| e.to_string())
+                };
                 (
-                    text(with_limits(LIMITS, || eval(&ast, &ctx.fork()))),
-                    text(Program::new(&ast).run_with(&ctx.fork(), LIMITS)),
+                    json(with_limits(LIMITS, || eval(&ast, &ctx.fork()))),
+                    json(Program::new(&ast).run_with(&ctx.fork(), LIMITS)),
+                    expected_result(&src).to_string(),
                 )
-            });
-            let expected = format!("{:?}", Ok::<_, EvalError>(Object::Bool(true)));
-            assert_eq!(result, (expected.clone(), expected), "{}", name);
+            };
+            let expected = Ok(result.2);
+            assert_eq!((&result.0, &result.1), (&expected, &expected), "{}", name);
         }
     }
 
@@ -138,12 +147,10 @@ pub(crate) mod tests {
 
         for (test, expected) in tests {
             let src = read(Path::new("examples/errors").join(test));
-            let error = with_stack(move || {
-                Program::compile(&src)
-                    .and_then(|program| Ok(program.run_with(&Context::default(), LIMITS)?))
-                    .unwrap_err()
-                    .to_string()
-            });
+            let error = Program::compile(&src)
+                .and_then(|program| Ok(program.run_with(&Context::default(), LIMITS)?))
+                .unwrap_err()
+                .to_string();
 
             assert_eq!(error, expected, "{}", test);
         }
@@ -208,6 +215,110 @@ pub(crate) mod tests {
         }
     }
 
+    // a program nested 'n' times, in each of the ways to nest
+    fn nested_programs(n: usize) -> Vec<(&'static str, String)> {
+        vec![
+            ("parens", format!("{}1{}", "(".repeat(n), ")".repeat(n))),
+            ("sum", vec!["1"; n].join(" + ")),
+            ("and", vec!["true"; n].join(" && ")),
+            ("prefix", format!("{}true", "!".repeat(n))),
+            ("lists", format!("{}{}", "[".repeat(n), "]".repeat(n))),
+            ("records", format!("{}1{}", "{a: ".repeat(n), "}".repeat(n))),
+            (
+                "fields",
+                format!("let r = {{a: null}}; r{}", ".a".repeat(n)),
+            ),
+            ("calls", format!("fn f() {{ f }} f{}", "()".repeat(n))),
+            ("index", format!("let x = [0]; x{}", "[0]".repeat(n))),
+            (
+                "ifs",
+                format!("{}1{}", "if true { ".repeat(n), " }".repeat(n)),
+            ),
+            (
+                "fns",
+                format!("{}1{}", "(fn() { ".repeat(n), " })()".repeat(n)),
+            ),
+        ]
+    }
+
+    #[test]
+    fn test_nesting_limit() {
+        // on a thread with the default stack (2MB), like in any host of the library
+        std::thread::spawn(|| {
+            for i in 0..nested_programs(0).len() {
+                // the most nested program that can be parsed: it must run without a crash
+                let (n, program) = (1..)
+                    .map(|n| (n, Program::compile(&nested_programs(n)[i].1)))
+                    .take_while(|(_, program)| program.is_ok())
+                    .last()
+                    .unwrap();
+                let (name, src) = &nested_programs(n)[i];
+                assert!(n >= 20, "{}: only {} levels", name, n);
+                let limits = Limits::default();
+                let _ = program.unwrap().run_with(&Context::default(), limits);
+                let ast = parse_source(src).unwrap();
+                let _ = with_limits(limits, || eval(&ast, &Context::default()));
+
+                let (_, src) = &nested_programs(n + 1)[i];
+                let error = Program::compile(src).map(|_| ()).unwrap_err().to_string();
+                assert!(error.starts_with("Nesting too deep"), "{}: {}", name, error);
+            }
+            // a lot of code is fine, as long as it is not nested
+            let src = vec!["let x = 1 + 2;"; 10_000].join("\n");
+            assert!(Program::compile(&src).is_ok());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn test_scopes_are_freed() {
+        let programs = [
+            // a named function is bound in the scope it captures: a cycle
+            "fn f(n) { if n == 0 { 0 } else { f(n - 1) } } f(10)",
+            "let f = fn(x) { x }; f(1)",
+            // functions defined in calls, in blocks, closures of closures
+            "fn outer(n) { fn inner(x) { x + n } inner(1) } outer(1) + outer(2)",
+            "if true { fn g() { 1 } g() } else { 0 }",
+            "fn adder(n) { fn(x) { x + n } } map([1, 2], adder(10))",
+            "fn f(n, k) { if n == 0 { k() } else { f(n - 1, fn() { k() + 1 }) } } f(50, fn() { 0 })",
+            "fn even(n) { if n == 0 { true } else { odd(n - 1) } } fn odd(n) { if n == 0 { false } else { even(n - 1) } } even(20)",
+            // errors in the middle of a run
+            "fn f() { fn g() { 1 / 0 } g() } f()",
+        ];
+        let base = Context::default();
+        base.bind("tx", r#"{"to": "0x01"}"#).unwrap();
+        for src in programs {
+            let program = Program::compile(src).unwrap();
+            let live = eval::live_scopes();
+            for _ in 0..10 {
+                let _ = program.run_once(base.fork(), LIMITS);
+                let _ = program.run_tree_walking(base.fork(), LIMITS);
+            }
+            assert_eq!(eval::live_scopes(), live, "scopes leak: {}", src);
+        }
+    }
+
+    #[test]
+    fn test_collected_runs_keep_what_is_used() {
+        // a closure in the result keeps its scope
+        let program = Program::compile("fn adder(n) { fn(x) { x + n } } adder(40)").unwrap();
+        let add = program.run_once(Context::default(), LIMITS).unwrap();
+        let ctx = Context::default();
+        ctx.bind("add", add).unwrap();
+        let program = Program::compile("add(2)").unwrap();
+        assert_eq!(program.run(&ctx), Ok(Object::Int(42.into())));
+
+        // bindings of 'run' stay in the context, with the scopes they use
+        let ctx = Context::default();
+        let program =
+            Program::compile("fn adder(n) { fn(x) { x + n } } let a = adder(1);").unwrap();
+        program.run(&ctx).unwrap();
+        let program = Program::compile("fn twice(x) { a(a(x)) } twice(40)").unwrap();
+        assert_eq!(program.run(&ctx), Ok(Object::Int(42.into())));
+        assert_eq!(program.run(&ctx), Ok(Object::Int(42.into())));
+    }
+
     #[test]
     fn test_limits() {
         let fib = "fn fib(n) { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }";
@@ -228,14 +339,14 @@ pub(crate) mod tests {
         for _ in 0..3 {
             assert_eq!(program.run_with(&ctx, limits), Ok(Object::Int(55.into())));
         }
-        // the default limits fit into the stack of a test thread (2MB)
+        // the stack grows as needed: the default depth works on a test thread (2MB stack)
         let deep = "fn f(n) { if n == 0 { 0 } else { f(n - 1) } }";
-        let program = Program::compile(&format!("{} f(999)", deep)).unwrap();
+        let program = Program::compile(&format!("{} f(9999)", deep)).unwrap();
         assert_eq!(program.run(&ctx), Ok(Object::Int(0.into())));
-        let program = Program::compile(&format!("{} f(1000)", deep)).unwrap();
+        let program = Program::compile(&format!("{} f(10000)", deep)).unwrap();
         assert_eq!(
             program.run(&ctx).map_err(EvalError::without_position),
-            Err(EvalError::StackOverflow(1000))
+            Err(EvalError::StackOverflow(10_000))
         );
     }
 }

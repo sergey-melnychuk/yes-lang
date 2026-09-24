@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive, Zero};
@@ -86,6 +86,13 @@ pub enum Object {
 
 impl Display for Object {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        crate::grow(|| self.format(f))
+    }
+}
+
+impl Object {
+    // lists and records can be nested as deep as a program makes them
+    fn format(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Object::Null => write!(f, "null"),
             Object::Int(x) => write!(f, "{}", x),
@@ -182,15 +189,32 @@ impl PartialEq for Function {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct Scope {
     objects: HashMap<String, Object>,
     parent: Option<Context>,
 }
 
+impl Scope {
+    fn new(parent: Option<Context>) -> ScopeRef {
+        #[cfg(test)]
+        Scope::counted();
+        Rc::new(RefCell::new(Scope {
+            objects: HashMap::new(),
+            parent,
+        }))
+    }
+}
+
 /// A handle to a scope: cloning it shares the scope, it does not copy it.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct Context(Rc<RefCell<Scope>>);
+
+impl Default for Context {
+    fn default() -> Self {
+        Context(Scope::new(None))
+    }
+}
 
 impl Debug for Context {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -201,10 +225,9 @@ impl Debug for Context {
 impl Context {
     /// A new scope inside this one: bindings of the new scope are not visible here.
     pub fn fork(&self) -> Self {
-        Self(Rc::new(RefCell::new(Scope {
-            objects: Default::default(),
-            parent: Some(self.clone()),
-        })))
+        let scope = Scope::new(Some(self.clone()));
+        track(&scope);
+        Self(scope)
     }
 
     /// Binds a value to a name: JSON text, a `serde_json::Value` or an object, e.g.
@@ -230,9 +253,8 @@ impl Context {
 /// Limits of a single run of a program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
-    /// Maximum depth of nested function calls. Each level takes ~2KB of stack in
-    /// optimized builds (~15KB in debug builds), so deep calls need a thread with a
-    /// big stack, see `with_stack`.
+    /// Maximum depth of nested function calls. The stack grows as needed (on the heap),
+    /// each level takes ~2KB in optimized builds, ~15KB in debug builds.
     pub max_depth: usize,
     /// Maximum number of function calls, `None` for no limit. Bounds the time a
     /// program can run: without loops, only calls can make it run long.
@@ -240,10 +262,10 @@ pub struct Limits {
 }
 
 impl Default for Limits {
-    /// Fits into the default stack of a thread (2MB): 1000 nested calls, any number of calls.
+    /// 10000 nested calls, any number of calls.
     fn default() -> Self {
         Limits {
-            max_depth: 1_000,
+            max_depth: 10_000,
             max_calls: None,
         }
     }
@@ -310,6 +332,149 @@ impl Drop for CallDepthGuard {
     }
 }
 
+// A named function is bound in the scope it captures ('fn f() {}' puts 'f' into the scope
+// that 'f' keeps alive), which is a cycle of reference-counted pointers: without help, such
+// scopes are never freed. So the scopes created during a run are tracked, and at the end of
+// the run, the ones that the result (and the context, when it is kept) cannot reach are
+// cleared, which breaks the cycles.
+
+type ScopeRef = Rc<RefCell<Scope>>;
+
+thread_local! {
+    // the scopes created during the current run, 'None' outside of a run
+    static RUN_SCOPES: RefCell<Option<Vec<Weak<RefCell<Scope>>>>> = const { RefCell::new(None) };
+}
+
+fn track(scope: &ScopeRef) {
+    RUN_SCOPES.with(|scopes| {
+        if let Some(scopes) = scopes.borrow_mut().as_mut() {
+            // a weak pointer keeps the memory of a freed scope, forget those from time to time
+            if scopes.len() == scopes.capacity() && scopes.len() >= 64 {
+                scopes.retain(|scope| scope.strong_count() > 0);
+            }
+            scopes.push(Rc::downgrade(scope));
+        }
+    });
+}
+
+/// Runs `f` in `ctx` with `limits`, then frees the scopes of the run that neither the result,
+/// nor `ctx` (if `keep` is set) reach. Without `keep`, `ctx` is released as well.
+pub(crate) fn run_collecting(
+    ctx: &Context,
+    limits: Limits,
+    keep: bool,
+    f: impl FnOnce() -> Result<Object, EvalError>,
+) -> Result<Object, EvalError> {
+    let outer = RUN_SCOPES.with(|scopes| scopes.replace(Some(Vec::new())));
+    if !keep {
+        track(&ctx.0);
+    }
+    let result = with_limits(limits, f);
+    let scopes = RUN_SCOPES
+        .with(|scopes| scopes.replace(outer))
+        .unwrap_or_default();
+    collect(scopes, keep.then_some(ctx), &result);
+    result
+}
+
+fn collect(
+    scopes: Vec<Weak<RefCell<Scope>>>,
+    ctx: Option<&Context>,
+    result: &Result<Object, EvalError>,
+) {
+    let scopes: Vec<ScopeRef> = scopes.iter().filter_map(Weak::upgrade).collect();
+    if scopes.is_empty() {
+        return;
+    }
+    let tracked: HashSet<*const RefCell<Scope>> = scopes.iter().map(Rc::as_ptr).collect();
+    let mut marker = Marker {
+        tracked: &tracked,
+        reached: HashSet::new(),
+        visited: HashSet::new(),
+    };
+    if let Some(ctx) = ctx {
+        // the scopes above 'ctx' existed before the run, and a run only adds to 'ctx'
+        for obj in ctx.0.borrow().objects.values() {
+            marker.object(obj);
+        }
+    }
+    if let Ok(obj) = result {
+        marker.object(obj);
+    }
+    // take everything out of the unreachable scopes first, only then drop it: dropping
+    // one by one could free a chain of scopes recursively, as deep as the chain is long
+    let mut garbage = Vec::new();
+    for scope in &scopes {
+        if !marker.reached.contains(&Rc::as_ptr(scope)) {
+            let mut scope = scope.borrow_mut();
+            garbage.push((std::mem::take(&mut scope.objects), scope.parent.take()));
+        }
+    }
+    drop(garbage);
+}
+
+struct Marker<'a> {
+    tracked: &'a HashSet<*const RefCell<Scope>>,
+    reached: HashSet<*const RefCell<Scope>>,
+    // lists and records already visited: shared ones are visited once
+    visited: HashSet<*const ()>,
+}
+
+impl Marker<'_> {
+    fn scope(&mut self, scope: &ScopeRef) {
+        let ptr = Rc::as_ptr(scope);
+        // scopes that existed before the run cannot reach the ones created during it
+        if !self.tracked.contains(&ptr) || !self.reached.insert(ptr) {
+            return;
+        }
+        let scope = scope.borrow();
+        for obj in scope.objects.values() {
+            self.object(obj);
+        }
+        if let Some(parent) = &scope.parent {
+            self.scope(&parent.0);
+        }
+    }
+
+    fn object(&mut self, obj: &Object) {
+        crate::grow(|| match obj {
+            Object::Func(f) => self.scope(&f.env.0),
+            Object::List(items) if self.visited.insert(Rc::as_ptr(items) as *const ()) => {
+                items.iter().for_each(|item| self.object(item));
+            }
+            Object::Record(fields) if self.visited.insert(Rc::as_ptr(fields) as *const ()) => {
+                fields.values().for_each(|value| self.object(value));
+            }
+            _ => {}
+        })
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static LIVE_SCOPES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The number of scopes alive on this thread, to test that they are freed.
+#[cfg(test)]
+pub(crate) fn live_scopes() -> usize {
+    LIVE_SCOPES.with(|n| n.get())
+}
+
+#[cfg(test)]
+impl Scope {
+    fn counted() {
+        LIVE_SCOPES.with(|n| n.set(n.get() + 1));
+    }
+}
+
+#[cfg(test)]
+impl Drop for Scope {
+    fn drop(&mut self) {
+        LIVE_SCOPES.with(|n| n.set(n.get() - 1));
+    }
+}
+
 // result of executing a statement: either continue with the next one or return
 pub(crate) enum Flow {
     Next(Object),
@@ -323,6 +488,10 @@ pub(crate) fn eval(statements: &[Statement], ctx: &Context) -> Result<Object, Ev
 }
 
 fn exec_block(statements: &[Statement], ctx: &Context) -> Result<Flow, EvalError> {
+    crate::grow(|| exec_statements(statements, ctx))
+}
+
+fn exec_statements(statements: &[Statement], ctx: &Context) -> Result<Flow, EvalError> {
     let mut result = Object::Null;
     for stmt in statements {
         match exec_stmt(stmt, ctx)? {
@@ -387,6 +556,10 @@ pub(crate) fn lookup(ctx: &Context, name: &str) -> Result<Object, EvalError> {
 }
 
 fn eval_expr(expr: &Expression, ctx: &Context) -> Result<Object, EvalError> {
+    crate::grow(|| eval_nested_expr(expr, ctx))
+}
+
+fn eval_nested_expr(expr: &Expression, ctx: &Context) -> Result<Object, EvalError> {
     match expr {
         Expression::At(pos, expr) => eval_expr(expr, ctx).map_err(|e| e.at(*pos)),
 
@@ -422,7 +595,7 @@ fn eval_expr(expr: &Expression, ctx: &Context) -> Result<Object, EvalError> {
                     .iter()
                     .map(|arg| eval_expr(arg, ctx))
                     .collect::<Result<Vec<_>, _>>()?;
-                b.call(args)
+                b.call(args, &call_value)
             }
             obj => Err(EvalError::NotFunction(obj)),
         },
@@ -617,6 +790,25 @@ fn eval_fn(f: &Function, args: &[Expression], ctx: &Context) -> Result<Object, E
     eval(&f.body, &fn_ctx)
 }
 
+// calls a function value with evaluated arguments (e.g. from a builtin like 'map')
+fn call_value(f: &Object, args: Vec<Object>) -> Result<Object, EvalError> {
+    match f {
+        Object::Func(f) => {
+            if f.params.len() != args.len() {
+                return Err(EvalError::ApplyArgsCount(f.params.len(), args.len()));
+            }
+            let fn_ctx = f.env.fork();
+            for (name, obj) in f.params.iter().zip(args) {
+                fn_ctx.put(name.clone(), obj);
+            }
+            let _guard = CallDepthGuard::enter()?;
+            eval(&f.body, &fn_ctx)
+        }
+        Object::Builtin(b) => b.call(args, &call_value),
+        obj => Err(EvalError::NotFunction(obj.clone())),
+    }
+}
+
 // a missing field is null
 pub(crate) fn get_field(fields: &BTreeMap<String, Object>, name: &str) -> Object {
     fields.get(name).cloned().unwrap_or(Object::Null)
@@ -698,9 +890,8 @@ mod tests {
     use crate::buffer::Buffer;
     use crate::compile::Program;
     use crate::lexer::tokenize;
-    use crate::parser::{parse, strip, Input};
+    use crate::parser::{Input, parse, strip};
     use crate::tests::LIMITS;
-    use crate::with_stack;
 
     fn int(x: i64) -> Object {
         Object::Int(x.into())
@@ -947,7 +1138,10 @@ mod tests {
                 Ok(string("bigsmallzero")),
             ),
             // 'return' leaves only the innermost function
-            (vec!["fn f() { let g = fn() { return 1; }; g(); 2 } f()"], Ok(int(2))),
+            (
+                vec!["fn f() { let g = fn() { return 1; }; g(); 2 } f()"],
+                Ok(int(2)),
+            ),
             (vec!["return 1; 2"], Ok(int(1))),
         ]);
     }
@@ -1060,12 +1254,17 @@ mod tests {
         }
         check(vec![
             t("{} == {} && len({}) == 0"),
-            t("let r = {a: 1, \"b c\": [2], nested: {x: b\"ff\"}}; r.a == 1 && r[\"b c\"][0] == 2 && r.nested.x == b\"ff\""),
+            t(
+                "let r = {a: 1, \"b c\": [2], nested: {x: b\"ff\"}}; r.a == 1 && r[\"b c\"][0] == 2 && r.nested.x == b\"ff\"",
+            ),
             t("{a: 1, b: 2} == {b: 2, a: 1} && {a: 1} != {a: 2} && {a: 1} != {b: 1}"),
             t("\"a\" in {a: null} && {a: 1}.nope == null && len({a: 1, b: 2}) == 2"),
             t("let x = 5; fn f(n) { {n: n, twice: n * 2} } f(x).twice == 10"),
             t("{to: b\"01\"} in [{to: b\"00\"}, {to: b\"01\"}]"),
-            (vec!["{a: undefined}"], Err(EvalError::NotFound("undefined".to_string()))),
+            (
+                vec!["{a: undefined}"],
+                Err(EvalError::NotFound("undefined".to_string())),
+            ),
         ]);
     }
 
@@ -1078,25 +1277,97 @@ mod tests {
             t("len(\"héllo\") == 5 && len(b\"a905\") == 2 && len([1, 2, 3]) == 3 && len([]) == 0"),
             t("int(b\"0100\") == 256 && int(b\"\") == 0 && int(b\"ff\") == 255"),
             t("int(\"0x10\") == 16 && int(\"-42\") == -42 && int(7) == 7"),
-            t("bytes(\"0xab\") == b\"ab\" && bytes(\"hi\") == b\"6869\" && bytes(b\"01\") == b\"01\""),
+            t(
+                "bytes(\"0xab\") == b\"ab\" && bytes(\"hi\") == b\"6869\" && bytes(b\"01\") == b\"01\"",
+            ),
             t("selector(\"transfer(address,uint256)\") == b\"a9059cbb\""),
-            t("keccak(\"\") == b\"c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470\""),
+            t(
+                "keccak(\"\") == b\"c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470\"",
+            ),
             t("keccak(b\"\") == keccak(\"\")"),
-            t("keccak(\"Transfer(address,address,uint256)\") == b\"ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef\""),
+            t(
+                "keccak(\"Transfer(address,address,uint256)\") == b\"ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef\"",
+            ),
             // builtins are values and can be shadowed
             t("let f = len; f(\"ab\") == 2"),
             t("let len = 42; len == 42"),
             t("fn f(len) { len + 1 } f(1) == 2"),
             (vec!["len"], Ok(Object::Builtin(Builtin::Len))),
             (vec!["len(1)"], Err(EvalError::Argument("len", int(1)))),
-            (vec!["int(\"abc\")"], Err(EvalError::Argument("int", string("abc")))),
-            (vec!["int(\"0x\")"], Err(EvalError::Argument("int", string("0x")))),
+            (
+                vec!["int(\"abc\")"],
+                Err(EvalError::Argument("int", string("abc"))),
+            ),
+            (
+                vec!["int(\"0x\")"],
+                Err(EvalError::Argument("int", string("0x"))),
+            ),
             // an odd number of digits is padded, like in JSON
-            (vec!["bytes(\"0xabc\")"], Ok(Object::Bytes(vec![0x0a, 0xbc].into()))),
-            (vec!["bytes(\"0xzz\")"], Err(EvalError::Argument("bytes", string("0xzz")))),
-            (vec!["selector(b\"00\")"], Err(EvalError::Argument("selector", Object::Bytes(vec![0].into())))),
-            (vec!["len(\"a\", \"b\")"], Err(EvalError::ApplyArgsCount(1, 2))),
-            (vec!["nope(1)"], Err(EvalError::NotFound("nope".to_string()))),
+            (
+                vec!["bytes(\"0xabc\")"],
+                Ok(Object::Bytes(vec![0x0a, 0xbc].into())),
+            ),
+            (
+                vec!["bytes(\"0xzz\")"],
+                Err(EvalError::Argument("bytes", string("0xzz"))),
+            ),
+            (
+                vec!["selector(b\"00\")"],
+                Err(EvalError::Argument(
+                    "selector",
+                    Object::Bytes(vec![0].into()),
+                )),
+            ),
+            (
+                vec!["len(\"a\", \"b\")"],
+                Err(EvalError::ApplyArgsCount(1, 2)),
+            ),
+            (
+                vec!["nope(1)"],
+                Err(EvalError::NotFound("nope".to_string())),
+            ),
+        ]);
+    }
+
+    #[test]
+    fn test_higher_order_builtins() {
+        fn t(src: &str) -> (Vec<&str>, Result<Object, EvalError>) {
+            (vec![src], Ok(Object::Bool(true)))
+        }
+        check(vec![
+            t("map([1, 2, 3], fn(x) { x * 2 }) == [2, 4, 6] && map([], fn(x) { 1 / 0 }) == []"),
+            t("filter([1, 2, 3, 4], fn(x) { x % 2 == 0 }) == [2, 4]"),
+            t("any([1, 2, 3], fn(x) { x > 2 }) && !any([], fn(x) { true })"),
+            t(
+                "all([1, 2, 3], fn(x) { x > 0 }) && all([], fn(x) { false }) && !all([1, -1], fn(x) { x > 0 })",
+            ),
+            // builtins and named functions can be passed too, closures capture their scope
+            t("map([\"ab\", \"c\"], len) == [2, 1]"),
+            t("fn big(x) { x > 10 } filter([5, 50], big) == [50]"),
+            t("let n = 10; map([1, 2], fn(x) { x + n }) == [11, 12]"),
+            t("map([[1, 2], [3]], fn(xs) { map(xs, fn(x) { x * x }) }) == [[1, 4], [9]]"),
+            // 'any' and 'all' stop at the first item that decides the result
+            t("any([1, 0], fn(x) { 1 / x == 1 }) && !all([0, 0], fn(x) { x != 0 && 1 / x == 1 })"),
+            t("let map = 1; map == 1"),
+            (
+                vec!["map([1], fn(x) { x })(1)"],
+                Err(EvalError::NotFunction(Object::List(Rc::new(vec![int(1)])))),
+            ),
+            (
+                vec!["filter([1], fn(x) { x })"],
+                Err(EvalError::NotBoolean(int(1))),
+            ),
+            (vec!["map(1, len)"], Err(EvalError::Argument("map", int(1)))),
+            (vec!["map([1], 2)"], Err(EvalError::NotFunction(int(2)))),
+            (
+                vec!["map([1], fn(a, b) { a })"],
+                Err(EvalError::ApplyArgsCount(2, 1)),
+            ),
+            (vec!["map([1])"], Err(EvalError::ApplyArgsCount(2, 1))),
+            (
+                vec!["any([0], fn(x) { 1 / x })"],
+                Err(EvalError::DivisionByZero),
+            ),
         ]);
     }
 
@@ -1151,16 +1422,14 @@ mod tests {
 
     #[test]
     fn test_call_depth() {
-        with_stack(|| {
-            let ctx = Context::default();
-            let f = "fn f(n) { if n == 0 { 0 } else { f(n - 1) } }";
-            assert_eq!(
-                run_eval_in(&[f, "f(100000)"], &ctx),
-                Err(EvalError::StackOverflow(LIMITS.max_depth))
-            );
-            // the depth counter is reset after the error
-            assert_eq!(run_eval_in(&[f, "f(9000)"], &ctx), Ok(int(0)));
-        });
+        let ctx = Context::default();
+        let f = "fn f(n) { if n == 0 { 0 } else { f(n - 1) } }";
+        assert_eq!(
+            run_eval_in(&[f, "f(100000)"], &ctx),
+            Err(EvalError::StackOverflow(LIMITS.max_depth))
+        );
+        // the depth counter is reset after the error
+        assert_eq!(run_eval_in(&[f, "f(9000)"], &ctx), Ok(int(0)));
     }
 
     fn tx() -> Object {
@@ -1196,15 +1465,27 @@ mod tests {
             ("tx[\"to\"] == tx.to", Ok(Object::Bool(true))),
             ("tx.data[0]", Ok(int(0xa9))),
             ("tx.data[4..]", Ok(Object::Bytes(vec![0x00, 0x01].into()))),
-            ("tx.logs[0].topics[0][..2]", Ok(Object::Bytes(vec![0xdd, 0xf2].into()))),
+            (
+                "tx.logs[0].topics[0][..2]",
+                Ok(Object::Bytes(vec![0xdd, 0xf2].into())),
+            ),
             ("tx.value / 1000000000000000000", Ok(int(1))),
             ("tx.nope", Ok(Object::Null)),
             ("tx[\"nope\"] == null", Ok(Object::Bool(true))),
-            ("tx.nope.x", Err(EvalError::Field(Object::Null, "x".to_string()))),
+            (
+                "tx.nope.x",
+                Err(EvalError::Field(Object::Null, "x".to_string())),
+            ),
             ("\"to\" in tx && !(\"nope\" in tx)", Ok(Object::Bool(true))),
-            ("tx.to in [\"0x00\", \"0xdac17f958d2ee523a2206206994597c13d831ec7\"]", Ok(Object::Bool(true))),
+            (
+                "tx.to in [\"0x00\", \"0xdac17f958d2ee523a2206206994597c13d831ec7\"]",
+                Ok(Object::Bool(true)),
+            ),
             ("tx.data[6]", Err(EvalError::IndexOutOfBounds(6.into(), 6))),
-            ("tx.data[-1]", Err(EvalError::IndexOutOfBounds((-1).into(), 6))),
+            (
+                "tx.data[-1]",
+                Err(EvalError::IndexOutOfBounds((-1).into(), 6)),
+            ),
             (
                 "tx.data[\"x\"]",
                 Err(EvalError::Index(
@@ -1217,7 +1498,10 @@ mod tests {
             ("b\"\"[0..4] == b\"\"", Ok(Object::Bool(true))),
             ("b\"010203\"[2..1]", Ok(Object::Bytes(vec![].into()))),
             ("b\"010203\"[-5..2]", Ok(Object::Bytes(vec![1, 2].into()))),
-            ("b\"010203\"[1..99999999999999999999]", Ok(Object::Bytes(vec![2, 3].into()))),
+            (
+                "b\"010203\"[1..99999999999999999999]",
+                Ok(Object::Bytes(vec![2, 3].into())),
+            ),
             ("\"hello\"[1..3]", Ok(string("el"))),
             ("\"héllo\"[1]", Ok(string("é"))),
             // any expression can be called

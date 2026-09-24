@@ -2,9 +2,7 @@ use std::env::args;
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
-use yes_lang::{
-    is_identifier, take_warnings, to_json, with_stack, Context, Error, Limits, Object, Program,
-};
+use yes_lang::{Context, Error, Limits, Object, Program, is_identifier, take_warnings, to_json};
 
 const USAGE: &str = "usage: yes-lang [FILE] [OPTIONS]
 
@@ -34,7 +32,7 @@ const OK: u8 = 0;
 const FALSE: u8 = 1;
 const ERROR: u8 = 2;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 struct Options {
     file: Option<String>,
     binds: Vec<(String, String)>,
@@ -42,23 +40,6 @@ struct Options {
     count: bool,
     limits: Limits,
     debug: bool,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Options {
-            file: None,
-            binds: vec![],
-            stream: None,
-            count: false,
-            // runs on a thread from 'with_stack', so calls can be nested deeper
-            limits: Limits {
-                max_depth: 10_000,
-                max_calls: None,
-            },
-            debug: false,
-        }
-    }
 }
 
 fn parse_args(args: &[String]) -> Result<Options, String> {
@@ -116,7 +97,7 @@ fn bind(ctx: &Context, name: &str, value: &str) -> Result<(), Error> {
 }
 
 fn main() -> ExitCode {
-    ExitCode::from(with_stack(run))
+    ExitCode::from(run())
 }
 
 fn run() -> u8 {
@@ -192,10 +173,11 @@ fn apply(
     line: &str,
     limits: Limits,
 ) -> Result<Option<String>, Error> {
-    // each line is bound in its own scope, so lines do not see each other
+    // each line is bound in its own scope, so lines do not see each other, and the scope
+    // is released after the run
     let ctx = ctx.fork();
     ctx.bind(name, line)?;
-    Ok(match program.run_with(&ctx, limits)? {
+    Ok(match program.run_once(ctx, limits)? {
         Object::Bool(true) => Some(line.to_string()),
         Object::Bool(false) | Object::Null => None,
         obj => Some(to_json(&obj)?.to_string()),
@@ -251,10 +233,11 @@ fn run_repl(ctx: &Context, options: &Options) {
         print!("> ");
         io::stdout().flush().unwrap();
 
-        let line = if let Some(Ok(line)) = stdin.lock().lines().next() {
-            line
-        } else {
-            break;
+        let line = match stdin.lock().lines().next() {
+            Some(Ok(line)) => line,
+            _ => {
+                break;
+            }
         };
 
         let result = if line.is_empty() {
@@ -395,6 +378,46 @@ mod tests {
     }
 
     #[test]
+    fn test_stream_receipts() {
+        let receipts = read("examples/receipts.ndjson");
+        let run = |path: &str| -> Vec<(usize, Option<String>)> {
+            let program = program(&read(path));
+            receipts
+                .lines()
+                .enumerate()
+                .map(|(i, line)| {
+                    (
+                        i,
+                        apply_to(&program, &Context::default(), "receipt", line).unwrap(),
+                    )
+                })
+                .collect()
+        };
+        // 17 transfers of USDC and USDT, at most one per receipt
+        let transfers: Vec<serde_json::Value> = run("examples/transfers.yes")
+            .into_iter()
+            .filter_map(|(_, output)| output)
+            .flat_map(|json| match serde_json::from_str(&json).unwrap() {
+                serde_json::Value::Array(items) => items,
+                json => panic!("not a list: {}", json),
+            })
+            .collect();
+        assert_eq!(transfers.len(), 17);
+        assert_eq!(transfers[0]["token"], "USDC");
+        assert_eq!(transfers[0]["amount"], 6000000);
+        assert_eq!(
+            transfers[0]["to"],
+            "0x043e54b4eff4433c7e3b472cbff31bfd28b8a86c"
+        );
+        // receipts with a transfer of at least 1000
+        let large: Vec<usize> = run("examples/large.yes")
+            .into_iter()
+            .filter_map(|(i, output)| output.map(|_| i))
+            .collect();
+        assert_eq!(large, vec![6, 16]);
+    }
+
+    #[test]
     fn test_stream_output() {
         let ctx = Context::default();
         let line = r#"{"to": "0x01", "n": 2}"#;
@@ -426,12 +449,16 @@ mod tests {
         bind(&ctx, "tokens", r#"["0x01", "0x02"]"#).unwrap();
         let predicate = program("tx.to in tokens");
         assert!(apply_to(&predicate, &ctx, "t", r#"{}"#).is_err());
-        assert!(apply_to(&predicate, &ctx, "tx", r#"{"to": "0x02"}"#)
-            .unwrap()
-            .is_some());
-        assert!(apply_to(&predicate, &ctx, "tx", r#"{"to": "0x03"}"#)
-            .unwrap()
-            .is_none());
+        assert!(
+            apply_to(&predicate, &ctx, "tx", r#"{"to": "0x02"}"#)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            apply_to(&predicate, &ctx, "tx", r#"{"to": "0x03"}"#)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(ctx.get("tx"), None);
     }
 
@@ -439,9 +466,11 @@ mod tests {
     fn test_stream_errors() {
         let ctx = Context::default();
         let predicate = program("tx.to == b\"00\"");
-        assert!(apply_to(&predicate, &ctx, "tx", r#"{"to": null}"#)
-            .unwrap()
-            .is_none());
+        assert!(
+            apply_to(&predicate, &ctx, "tx", r#"{"to": null}"#)
+                .unwrap()
+                .is_none()
+        );
         assert!(apply_to(&predicate, &ctx, "tx", r#"{}"#).unwrap().is_none());
         assert!(matches!(
             apply_to(&predicate, &ctx, "tx", "not json"),
@@ -453,15 +482,19 @@ mod tests {
             max_depth: 100,
             max_calls: Some(10),
         };
-        assert!(apply(&predicate, &ctx, "tx", r#"{"n": 5}"#, limits)
-            .unwrap()
-            .is_some());
+        assert!(
+            apply(&predicate, &ctx, "tx", r#"{"n": 5}"#, limits)
+                .unwrap()
+                .is_some()
+        );
         match apply(&predicate, &ctx, "tx", r#"{"n": 50}"#, limits) {
             Err(Error::Eval(e)) => assert_eq!(e.without_position(), EvalError::CallLimit(10)),
             result => panic!("unexpected: {:?}", result),
         }
-        assert!(apply(&predicate, &ctx, "tx", r#"{"n": 5}"#, limits)
-            .unwrap()
-            .is_some());
+        assert!(
+            apply(&predicate, &ctx, "tx", r#"{"n": 5}"#, limits)
+                .unwrap()
+                .is_some()
+        );
     }
 }

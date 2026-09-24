@@ -40,6 +40,9 @@ Non-goals:
 
 `cargo test`
 
+CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, the tests on stable and on the
+minimum supported version (1.88). Fuzzing: see [fuzz](fuzz/README.md).
+
 ### Run
 
 Example: [fib.yes](examples/fib.yes).
@@ -73,6 +76,9 @@ Builtins:
 | `bytes(x)` | bytes from a `"0x..."` hex string, or UTF-8 bytes of any other string |
 | `keccak(x)` | Keccak-256 of bytes or of a UTF-8 string |
 | `selector(s)` | function selector: `keccak(s)[..4]` |
+| `map(list, f)` | the list of `f(item)` for each item |
+| `filter(list, f)` | the items for which `f(item)` is `true` |
+| `any(list, f)`, `all(list, f)` | whether `f(item)` is `true` for any / all items (stop at the first that decides) |
 
 A builtin is used only when nothing is bound to its name, so `let len = 42;` is fine.
 
@@ -84,7 +90,8 @@ A missing record field is `null`.
 More examples: [closures](examples/closures.yes), [return](examples/return.yes),
 [logic](examples/logic.yes), [bigint](examples/bigint.yes), [strings](examples/strings.yes),
 [bytes](examples/bytes.yes), [equality](examples/equality.yes), [lists](examples/lists.yes),
-[records](examples/records.yes),
+[records](examples/records.yes), [transfers](examples/transfers.yes) and [large](examples/large.yes)
+(ERC-20 transfers from the logs of [receipts](examples/receipts.ndjson)),
 [erc20](examples/erc20.yes), [errors](examples/errors).
 All of them are run by `cargo test`, with both the tree-walking interpreter and the compiled closures.
 
@@ -135,6 +142,17 @@ An error on a line is reported and the stream goes on.
 
 Limits: `--max-depth:N` of nested calls (default 10000), `--max-calls:N` per run (per line
 of a stream, no limit by default), so that a program from somebody else cannot hang the tool.
+Neither deep recursion nor deeply nested code can overflow the stack: it grows on the heap as
+needed ([stacker](https://crates.io/crates/stacker)), and nesting is limited to 200 levels.
+
+Receipts work the same way, e.g. decoding the transfers of USDC and USDT from their logs with
+[transfers.yes](examples/transfers.yes):
+
+```shell
+$ cargo run -q -- examples/transfers.yes --stream:receipt < examples/receipts.ndjson
+[{"amount":6000000,"from":"0x171c402553e571bf052208aee5bb694b6608a884","to":"0x043e54b4eff4433c7e3b472cbff31bfd28b8a86c","token":"USDC"}]
+[...]
+```
 
 Exit code, like `grep`: 0 if the result is not `false` (a stream printed something), 1 if it
 is `false` (a stream printed nothing), 2 on errors.
@@ -150,14 +168,22 @@ let ctx = Context::default();
 ctx.bind("tx", r#"{"to": "0xdac17f958d2ee523a2206206994597c13d831ec7"}"#)?;
 assert_eq!(predicate.run(&ctx)?, Object::Bool(true));
 
-// each run can be limited, the default limits fit into the stack of any thread
+// each run can be limited
 let limits = Limits { max_depth: 100, max_calls: Some(10_000) };
-predicate.run_with(&ctx.fork(), limits)?;
+predicate.run_with(&ctx, limits)?;
+
+// for many inputs: bind each in a new scope, which is released after the run
+for tx in [r#"{"to": "0x01"}"#, r#"{"to": "0x02"}"#] {
+    let scope = ctx.fork();
+    scope.bind("tx", tx)?;
+    assert_eq!(predicate.run_once(scope, limits)?, Object::Bool(false));
+}
 ```
 
-`Program::run` puts bindings made by the program into the context, run it on `ctx.fork()`
-to keep the context clean (e.g. for each item of a stream). For deeply recursive programs,
-run on a thread with a big stack (`yes_lang::with_stack`) and raise `Limits::max_depth`.
+`Program::run` and `run_with` put the bindings made by the program (`let`, `fn`) into the
+context, like a REPL. `Program::run_once` releases the context after the run: use it for
+the items of a stream, so that nothing but the results is kept (a function bound in the
+scope it captures is a cycle, which is freed at the end of each run).
 `yes_lang::to_json` converts a result back to JSON.
 
 `cargo test --release bench -- --ignored --nocapture` measures streaming on

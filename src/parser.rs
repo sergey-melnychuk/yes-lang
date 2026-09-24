@@ -1,5 +1,6 @@
 use num_bigint::BigInt;
 
+use std::cell::Cell;
 use std::ops::Deref;
 
 use crate::buffer::{Buffer, Iterable};
@@ -103,10 +104,16 @@ fn at(pos: Pos, expr: Expression) -> Expression {
     Expression::At(pos, Box::new(expr))
 }
 
+/// Maximum nesting of expressions and blocks, like '((((...' or '1+1+...+1' (each '+' is
+/// nested in the next one). Parsing and running grow the stack as needed, but dropping
+/// a syntax tree recurses as deep as it is nested, and that cannot grow the stack.
+pub(crate) const MAX_NESTING: usize = 200;
+
 /// Tokens with their positions in the source.
 pub(crate) struct Input {
     tokens: Buffer<Token>,
     positions: Vec<Pos>,
+    nesting: Cell<usize>,
 }
 
 impl Input {
@@ -114,7 +121,26 @@ impl Input {
         Input {
             tokens: Buffer::new(tokens),
             positions,
+            nesting: Cell::new(0),
         }
+    }
+
+    // one more level of nesting
+    fn nest(&self) -> Result<(), ParserError> {
+        let nesting = self.nesting.get() + 1;
+        if nesting > MAX_NESTING {
+            return Err(ParserError::TooDeep(MAX_NESTING));
+        }
+        self.nesting.set(nesting);
+        Ok(())
+    }
+
+    // runs 'parse', the nesting it adds is removed afterwards
+    fn nested<T>(&self, parse: impl FnOnce() -> Result<T, ParserError>) -> Result<T, ParserError> {
+        let nesting = self.nesting.get();
+        let result = crate::grow(parse);
+        self.nesting.set(nesting);
+        result
     }
 
     /// Position of the token returned by the latest `next` or `peek`.
@@ -266,7 +292,7 @@ impl PrefixParser for Operator {
     }
 }
 
-fn get_prefix_parser(token: &Token) -> Option<impl PrefixParser> {
+fn get_prefix_parser(token: &Token) -> Option<impl PrefixParser + use<>> {
     match token {
         Token::Operator(DASH) => Some(Operator::Neg),
         Token::Operator(BANG) => Some(Operator::Not),
@@ -322,7 +348,7 @@ impl InfixParser for Operator {
     }
 }
 
-fn get_infix_parser(token: &Token) -> Option<impl InfixParser> {
+fn get_infix_parser(token: &Token) -> Option<impl InfixParser + use<>> {
     match token {
         Token::Operator(PLUS) => Some(Operator::Add),
         Token::Operator(DASH) => Some(Operator::Sub),
@@ -350,6 +376,11 @@ fn is_postfix(token: &Token) -> bool {
 }
 
 fn parse_expression(buffer: &Input, rank: usize) -> Result<Expression, ParserError> {
+    buffer.nested(|| parse_nested_expression(buffer, rank))
+}
+
+fn parse_nested_expression(buffer: &Input, rank: usize) -> Result<Expression, ParserError> {
+    buffer.nest()?;
     let token = next(buffer)?;
     let pos = buffer.pos();
     let mut expr = match token {
@@ -379,11 +410,13 @@ fn parse_expression(buffer: &Input, rank: usize) -> Result<Expression, ParserErr
         let token = peek(buffer)?;
         // calls, indexing, slicing and field access bind tighter than any operator
         if is_postfix(token) {
+            buffer.nest()?; // 'expr' becomes nested in the postfix expression
             expr = parse_postfix(expr, buffer)?;
             continue;
         }
         match get_infix_parser(token) {
             Some(mut op) if rank < op.rank() => {
+                buffer.nest()?; // 'expr' becomes nested in the infix expression
                 let _ = next(buffer)?;
                 let pos = buffer.pos();
                 expr = at(pos, op.parse(expr, token, buffer)?);
@@ -468,10 +501,13 @@ fn parse_if_statement(buffer: &Input) -> Result<Statement, ParserError> {
 }
 
 fn parse_braced_block(buffer: &Input) -> Result<Vec<Statement>, ParserError> {
-    expect(buffer, &Token::Delimiter('{'))?;
-    let block = parse_block(buffer)?;
-    expect(buffer, &Token::Delimiter('}'))?;
-    Ok(block)
+    buffer.nested(|| {
+        buffer.nest()?;
+        expect(buffer, &Token::Delimiter('{'))?;
+        let block = parse_block(buffer)?;
+        expect(buffer, &Token::Delimiter('}'))?;
+        Ok(block)
+    })
 }
 
 fn parse_fn_params(buffer: &Input) -> Result<Vec<String>, ParserError> {
@@ -508,7 +544,7 @@ fn parse_list(buffer: &Input, closing: char) -> Result<Vec<Expression>, ParserEr
                 return Err(ParserError::Mismatch(
                     Token::Delimiter(closing),
                     token.clone(),
-                ))
+                ));
             }
         }
     }
@@ -526,7 +562,7 @@ fn parse_record(buffer: &Input) -> Result<Vec<(String, Expression)>, ParserError
                 return Err(ParserError::Mismatch(
                     Token::Identifier("*".to_string()),
                     token.clone(),
-                ))
+                ));
             }
         };
         if fields.iter().any(|(k, _)| *k == key) {

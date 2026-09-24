@@ -12,8 +12,8 @@ use std::rc::Rc;
 use crate::builtin::Builtin;
 use crate::error::{Error, EvalError};
 use crate::eval::{
-    at, eval, eval_eq, eval_index, eval_infix, eval_prefix, eval_slice, get_field, lookup,
-    with_limits, CallDepthGuard, Context, Flow, Function, Limits, Object,
+    CallDepthGuard, Context, Flow, Function, Limits, Object, at, eval, eval_eq, eval_index,
+    eval_infix, eval_prefix, eval_slice, get_field, lookup, run_collecting,
 };
 use crate::parser::{Expression, Operator, Statement};
 
@@ -55,14 +55,36 @@ impl Program {
         self.run_with(ctx, Limits::default())
     }
 
+    /// Runs the program in a context made for this run only (e.g. `ctx.fork()` with the
+    /// input bound in it): the context is released after the run, so that nothing but the
+    /// result is kept. Use this to run a program on many inputs, e.g. on each item of a stream.
+    pub fn run_once(&self, ctx: Context, limits: Limits) -> Result<Object, EvalError> {
+        run_collecting(&ctx, limits, false, || self.run_code(&ctx))
+    }
+
+    /// Runs the program with the tree-walking interpreter, which the compiled closures
+    /// must agree with: for differential testing (fuzzing) only.
+    #[doc(hidden)]
+    pub fn run_tree_walking(&self, ctx: Context, limits: Limits) -> Result<Object, EvalError> {
+        run_collecting(&ctx, limits, false, || eval(&self.ast, &ctx))
+    }
+
     pub fn run_with(&self, ctx: &Context, limits: Limits) -> Result<Object, EvalError> {
-        with_limits(limits, || match run_block(&self.code, ctx)? {
+        run_collecting(ctx, limits, true, || self.run_code(ctx))
+    }
+
+    fn run_code(&self, ctx: &Context) -> Result<Object, EvalError> {
+        match run_block(&self.code, ctx)? {
             Flow::Next(obj) | Flow::Return(obj) => Ok(obj),
-        })
+        }
     }
 }
 
 fn run_block(block: &[Stmt], ctx: &Context) -> Result<Flow, EvalError> {
+    crate::grow(|| run_statements(block, ctx))
+}
+
+fn run_statements(block: &[Stmt], ctx: &Context) -> Result<Flow, EvalError> {
     let mut result = Object::Null;
     for stmt in block {
         match stmt(ctx)? {
@@ -74,7 +96,7 @@ fn run_block(block: &[Stmt], ctx: &Context) -> Result<Flow, EvalError> {
 }
 
 fn compile_block(statements: &[Statement]) -> Block {
-    statements.iter().map(compile_stmt).collect()
+    crate::grow(|| statements.iter().map(compile_stmt).collect())
 }
 
 fn compile_stmt(stmt: &Statement) -> Stmt {
@@ -132,7 +154,7 @@ fn compile_stmt(stmt: &Statement) -> Stmt {
 }
 
 // the body is compiled once, each evaluation only captures the current scope
-fn compile_fn(params: &[String], body: &[Statement]) -> impl Fn(&Context) -> Object {
+fn compile_fn(params: &[String], body: &[Statement]) -> impl Fn(&Context) -> Object + use<> {
     let params = Rc::new(params.to_vec());
     let ast = Rc::new(body.to_vec());
     let code = Rc::new(compile_block(body));
@@ -162,11 +184,17 @@ fn run_exprs(exprs: &[Expr], ctx: &Context) -> Result<Vec<Object>, EvalError> {
 }
 
 fn compile_expr(expr: &Expression) -> Expr {
+    crate::grow(|| compile_nested_expr(expr))
+}
+
+// the stack can grow at every node that other nodes are nested in (see 'At', 'List', 'Record'
+// and 'run_block'), so that running deeply nested code does not overflow it
+fn compile_nested_expr(expr: &Expression) -> Expr {
     match expr {
         Expression::At(pos, expr) => {
             let pos = *pos;
             let expr = compile_expr(expr);
-            Box::new(move |ctx| expr(ctx).map_err(|e| e.at(pos)))
+            Box::new(move |ctx| crate::grow(|| expr(ctx)).map_err(|e| e.at(pos)))
         }
 
         Expression::Lit(lit) => {
@@ -241,7 +269,7 @@ fn compile_expr(expr: &Expression) -> Expr {
                 None => match cached.get() {
                     Some(obj) => Ok(obj.clone()),
                     None => {
-                        let obj = builtin.call(literals.clone())?;
+                        let obj = builtin.call(literals.clone(), &call_value)?;
                         Ok(cached.get_or_init(|| obj).clone())
                     }
                 },
@@ -281,7 +309,7 @@ fn compile_expr(expr: &Expression) -> Expr {
 
         Expression::List(items) => {
             let items = compile_exprs(items);
-            Box::new(move |ctx| Ok(Object::List(Rc::new(run_exprs(&items, ctx)?))))
+            Box::new(move |ctx| crate::grow(|| Ok(Object::List(Rc::new(run_exprs(&items, ctx)?)))))
         }
 
         Expression::Record(fields) => {
@@ -290,11 +318,13 @@ fn compile_expr(expr: &Expression) -> Expr {
                 .map(|(name, expr)| (name.clone(), compile_expr(expr)))
                 .collect();
             Box::new(move |ctx| {
-                let fields = fields
-                    .iter()
-                    .map(|(name, expr)| Ok((name.clone(), expr(ctx)?)))
-                    .collect::<Result<_, EvalError>>()?;
-                Ok(Object::Record(Rc::new(fields)))
+                crate::grow(|| {
+                    let fields = fields
+                        .iter()
+                        .map(|(name, expr)| Ok((name.clone(), expr(ctx)?)))
+                        .collect::<Result<_, EvalError>>()?;
+                    Ok(Object::Record(Rc::new(fields)))
+                })
             })
         }
 
@@ -321,16 +351,39 @@ fn call(callee: Object, args: &[Expr], ctx: &Context) -> Result<Object, EvalErro
                 fn_ctx.put(name.clone(), arg(ctx)?);
             }
             let _guard = CallDepthGuard::enter()?;
-            match &f.code {
-                Some(code) => match run_block(code, &fn_ctx)? {
-                    Flow::Next(obj) | Flow::Return(obj) => Ok(obj),
-                },
-                // a function created by the tree-walking interpreter
-                None => eval(&f.body, &fn_ctx),
-            }
+            run_fn(&f, &fn_ctx)
         }
-        Object::Builtin(b) => b.call(run_exprs(args, ctx)?),
+        Object::Builtin(b) => b.call(run_exprs(args, ctx)?, &call_value),
         obj => Err(EvalError::NotFunction(obj)),
+    }
+}
+
+// calls a function value with evaluated arguments (e.g. from a builtin like 'map')
+fn call_value(f: &Object, args: Vec<Object>) -> Result<Object, EvalError> {
+    match f {
+        Object::Func(f) => {
+            if f.params.len() != args.len() {
+                return Err(EvalError::ApplyArgsCount(f.params.len(), args.len()));
+            }
+            let fn_ctx = f.env.fork();
+            for (name, obj) in f.params.iter().zip(args) {
+                fn_ctx.put(name.clone(), obj);
+            }
+            let _guard = CallDepthGuard::enter()?;
+            run_fn(f, &fn_ctx)
+        }
+        Object::Builtin(b) => b.call(args, &call_value),
+        obj => Err(EvalError::NotFunction(obj.clone())),
+    }
+}
+
+fn run_fn(f: &Function, fn_ctx: &Context) -> Result<Object, EvalError> {
+    match &f.code {
+        Some(code) => match run_block(code, fn_ctx)? {
+            Flow::Next(obj) | Flow::Return(obj) => Ok(obj),
+        },
+        // a function created by the tree-walking interpreter
+        None => eval(&f.body, fn_ctx),
     }
 }
 

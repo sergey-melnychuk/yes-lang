@@ -215,13 +215,21 @@ pub fn from_json(value: &Value) -> Object {
 }
 
 /// Converts an object into JSON: bytes become "0x..." strings, integers keep their
-/// precision. Functions cannot be converted.
+/// precision. Functions, infinite floats and NaN cannot be converted.
 pub fn to_json(obj: &Object) -> Result<Value, EvalError> {
+    // lists and records can be nested as deep as a program makes them
+    crate::grow(|| to_nested_json(obj))
+}
+
+fn to_nested_json(obj: &Object) -> Result<Value, EvalError> {
     Ok(match obj {
         Object::Null => Value::Null,
         Object::Bool(b) => Value::Bool(*b),
         Object::Int(x) => serde_json::from_str(&x.to_string()).expect("integer is valid JSON"),
-        Object::Float(x) => serde_json::Number::from_f64(*x).map_or(Value::Null, Value::Number),
+        Object::Float(x) => match serde_json::Number::from_f64(*x) {
+            Some(number) => Value::Number(number),
+            None => return Err(EvalError::NotJson(obj.clone())),
+        },
         Object::Str(s) => Value::String(s.clone()),
         Object::Bytes(b) => {
             let hex: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
@@ -376,5 +384,10 @@ mod tests {
             to_json(&Object::Builtin(crate::Builtin::Len)),
             Err(EvalError::NotJson(Object::Builtin(crate::Builtin::Len)))
         );
+        // JSON has no infinity: a number too big for a float cannot be converted back
+        let inf = "22e2222".into_object().unwrap();
+        assert_eq!(inf, Object::Float(f64::INFINITY));
+        assert_eq!(to_json(&inf), Err(EvalError::NotJson(inf.clone())));
+        assert!(to_json(&Object::Float(f64::NAN)).is_err());
     }
 }

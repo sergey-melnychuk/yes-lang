@@ -1,0 +1,15 @@
+// A predicate for receipts with a transfer of at least 1000 USDC or USDT (both have 6 decimals):
+//   cargo run -q -- examples/large.yes --stream:receipt < examples/receipts.ndjson
+// or for a single receipt:
+//   cargo run -q -- examples/large.yes --bind:receipt=@examples/receipt.json
+
+let TRANSFER = keccak("Transfer(address,address,uint256)");
+let STABLES = [b"a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", b"dac17f958d2ee523a2206206994597c13d831ec7"];
+
+receipt.status == b"01"
+&& any(receipt.logs, fn(log) {
+  log.address in STABLES
+  && len(log.topics) == 3
+  && log.topics[0] == TRANSFER
+  && int(log.data) >= 1000 * 1000000
+})

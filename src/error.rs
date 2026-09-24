@@ -33,6 +33,7 @@ pub enum ParserError {
     Infix(Token),
     InvalidLiteral(String),
     DuplicateKey(String),
+    TooDeep(usize),
 }
 
 impl Display for ParserError {
@@ -46,6 +47,7 @@ impl Display for ParserError {
             ParserError::Infix(token) => write!(f, "No infix version of '{:?}' exists", token),
             ParserError::InvalidLiteral(lit) => write!(f, "Invalid literal: '{}'", lit),
             ParserError::DuplicateKey(key) => write!(f, "Duplicate key: '{}'", key),
+            ParserError::TooDeep(max) => write!(f, "Nesting too deep: more than {} levels", max),
         }
     }
 }
