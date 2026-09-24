@@ -6,12 +6,23 @@ use std::rc::{Rc, Weak};
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive, Zero};
 
-use crate::builtin::Builtin;
+use crate::builtin::builtin;
 use crate::compile::Block;
 use crate::error::{Error, EvalError};
-use crate::json::IntoObject;
+use crate::native::Native;
 use crate::parser::{BlockScope, Expression, Literal, Operator, Statement, defines_functions};
 use crate::token::Pos;
+
+/// A value that can be bound to a name with `Context::bind`.
+pub trait IntoObject {
+    fn into_object(self) -> Result<Object, Error>;
+}
+
+impl IntoObject for Object {
+    fn into_object(self) -> Result<Object, Error> {
+        Ok(self)
+    }
+}
 
 /// Bytes that share their buffer: copying them or taking a slice does not copy the bytes.
 #[derive(Clone)]
@@ -81,7 +92,7 @@ pub enum Object {
     List(Rc<Vec<Object>>),
     Record(Rc<BTreeMap<String, Object>>),
     Func(Rc<Function>),
-    Builtin(Builtin),
+    Native(Rc<Native>),
 }
 
 impl Display for Object {
@@ -96,10 +107,24 @@ impl Object {
         match self {
             Object::Null => write!(f, "null"),
             Object::Int(x) => write!(f, "{}", x),
-            Object::Float(x) => write!(f, "{}", x),
+            // like '1.0', '1e300', 'inf', so that floats are not taken for integers
+            Object::Float(x) => write!(f, "{:?}", x),
             Object::Bool(true) => write!(f, "true"),
             Object::Bool(false) => write!(f, "false"),
-            Object::Str(x) => write!(f, "\"{}\"", x),
+            Object::Str(x) => {
+                write!(f, "\"")?;
+                for c in x.chars() {
+                    match c {
+                        '"' => write!(f, "\\\"")?,
+                        '\\' => write!(f, "\\\\")?,
+                        '\n' => write!(f, "\\n")?,
+                        '\t' => write!(f, "\\t")?,
+                        '\r' => write!(f, "\\r")?,
+                        c => write!(f, "{}", c)?,
+                    }
+                }
+                write!(f, "\"")
+            }
             Object::Bytes(bytes) => {
                 write!(f, "b\"")?;
                 for b in bytes.iter() {
@@ -128,7 +153,7 @@ impl Object {
                 write!(f, "}}")
             }
             Object::Func(_) => write!(f, "<function>"),
-            Object::Builtin(b) => write!(f, "<builtin {}>", b.name()),
+            Object::Native(n) => write!(f, "<native {}>", n.name()),
         }
     }
 }
@@ -145,7 +170,7 @@ impl Object {
             Object::List(_) => "List",
             Object::Record(_) => "Record",
             Object::Func(_) => "Func",
-            Object::Builtin(_) => "Builtin",
+            Object::Native(_) => "Native",
         }
     }
 }
@@ -249,8 +274,13 @@ impl Context {
         }
     }
 
-    /// Binds a value to a name: JSON text, a `serde_json::Value` or an object, e.g.
-    /// `ctx.bind("tx", r#"{"to": "0x..."}"#)?` or `ctx.bind("tx", &value)?`.
+    /// Binds a native function to its name.
+    pub fn define(&self, native: Native) {
+        self.put(native.name().to_string(), Object::Native(Rc::new(native)));
+    }
+
+    /// Binds a value to a name: an object, or (with the 'json' feature) JSON text or a
+    /// `serde_json::Value`, e.g. `ctx.bind("tx", Json::hex(r#"{"to": "0x..."}"#))?`.
     pub fn bind(&self, name: &str, value: impl IntoObject) -> Result<(), Error> {
         self.put(name.to_string(), value.into_object()?);
         Ok(())
@@ -583,7 +613,7 @@ fn make_fn(params: &[String], body: &[Statement], ctx: &Context) -> Object {
 /// A name refers to a bound value, or to a builtin when nothing is bound to it.
 pub(crate) fn lookup(ctx: &Context, name: &str) -> Result<Object, EvalError> {
     ctx.get(name)
-        .or_else(|| Builtin::from_name(name).map(Object::Builtin))
+        .or_else(|| builtin(name).map(Object::Native))
         .ok_or_else(|| EvalError::NotFound(name.to_string()))
 }
 
@@ -622,7 +652,7 @@ fn eval_nested_expr(expr: &Expression, ctx: &Context) -> Result<Object, EvalErro
 
         Expression::Apply(lhs, args) => match eval_expr(lhs, ctx)? {
             Object::Func(f) => eval_fn(&f, args, ctx),
-            Object::Builtin(b) => {
+            Object::Native(b) => {
                 let args = args
                     .iter()
                     .map(|arg| eval_expr(arg, ctx))
@@ -798,12 +828,22 @@ fn same_type(a: &Object, b: &Object) -> bool {
     std::mem::discriminant(a) == std::mem::discriminant(b)
 }
 
-// numbers are equal by value, other values are equal only to values of the same type
+// numbers are equal by value, other values are equal only to values of the same type,
+// lists and records are equal when their items are (by the same rules)
 fn equals(a: &Object, b: &Object) -> bool {
-    match (a, b) {
+    crate::grow(|| match (a, b) {
         (Object::Int(x), Object::Float(y)) | (Object::Float(y), Object::Int(x)) => to_f64(x) == *y,
+        (Object::List(x), Object::List(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| equals(a, b))
+        }
+        (Object::Record(x), Object::Record(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y.iter())
+                    .all(|((ka, a), (kb, b))| ka == kb && equals(a, b))
+        }
         _ => same_type(a, b) && a == b,
-    }
+    })
 }
 
 fn eval_fn(f: &Function, args: &[Expression], ctx: &Context) -> Result<Object, EvalError> {
@@ -836,7 +876,7 @@ fn call_value(f: &Object, args: Vec<Object>) -> Result<Object, EvalError> {
             let _guard = CallDepthGuard::enter()?;
             eval(&f.body, &fn_ctx)
         }
-        Object::Builtin(b) => b.call(args, &call_value),
+        Object::Native(b) => b.call(args, &call_value),
         obj => Err(EvalError::NotFunction(obj.clone())),
     }
 }
@@ -1216,6 +1256,23 @@ mod tests {
     }
 
     #[test]
+    fn test_display() {
+        let display = |src: &str| run_eval(&[src]).unwrap().to_string();
+        assert_eq!(display("1.0"), "1.0");
+        assert_eq!(display("2 * 1.5"), "3.0");
+        assert_eq!(display("0.1 + 0.2"), "0.30000000000000004");
+        assert_eq!(display("-0.0"), "-0.0");
+        assert_eq!(display("1.0 / 0"), "inf");
+        assert_eq!(display("1"), "1");
+        // strings are printed as they are written
+        assert_eq!(display("\"q\\\"q\\\\\\n\""), "\"q\\\"q\\\\\\n\"");
+        assert_eq!(
+            display("[1, \"a\", b\"ff\", null, {k: 1.5}]"),
+            "[1, \"a\", b\"ff\", null, {k: 1.5}]"
+        );
+    }
+
+    #[test]
     fn test_lists_and_in() {
         check(vec![
             (vec!["[]"], Ok(Object::List(Rc::new(vec![])))),
@@ -1230,6 +1287,17 @@ mod tests {
             ),
             (vec!["[1, \"a\"] == [1, \"a\"]"], Ok(Object::Bool(true))),
             (vec!["[1, 2] != [2, 1]"], Ok(Object::Bool(true))),
+            // items are compared like values: numbers by value
+            (vec!["[1, [2]] == [1.0, [2.0]]"], Ok(Object::Bool(true))),
+            (
+                vec!["{a: [1]} == {a: [1.0]} && {a: 1} != {b: 1}"],
+                Ok(Object::Bool(true)),
+            ),
+            (vec!["[[1]] in [[[1.0]]]"], Ok(Object::Bool(true))),
+            (
+                vec!["[1] == [1, 2] || {a: 1} == {a: 1, b: 2}"],
+                Ok(Object::Bool(false)),
+            ),
             (vec!["2 in [1, 2, 3]"], Ok(Object::Bool(true))),
             (vec!["4 in [1, 2, 3]"], Ok(Object::Bool(false))),
             (vec!["2.0 in [1, 2]"], Ok(Object::Bool(true))),
@@ -1312,19 +1380,11 @@ mod tests {
             t(
                 "bytes(\"0xab\") == b\"ab\" && bytes(\"hi\") == b\"6869\" && bytes(b\"01\") == b\"01\"",
             ),
-            t("selector(\"transfer(address,uint256)\") == b\"a9059cbb\""),
-            t(
-                "keccak(\"\") == b\"c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470\"",
-            ),
-            t("keccak(b\"\") == keccak(\"\")"),
-            t(
-                "keccak(\"Transfer(address,address,uint256)\") == b\"ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef\"",
-            ),
             // builtins are values and can be shadowed
             t("let f = len; f(\"ab\") == 2"),
             t("let len = 42; len == 42"),
             t("fn f(len) { len + 1 } f(1) == 2"),
-            (vec!["len"], Ok(Object::Builtin(Builtin::Len))),
+            t("let f = len; f == len && len != map"),
             (vec!["len(1)"], Err(EvalError::Argument("len", int(1)))),
             (
                 vec!["int(\"abc\")"],
@@ -1334,6 +1394,13 @@ mod tests {
                 vec!["int(\"0x\")"],
                 Err(EvalError::Argument("int", string("0x"))),
             ),
+            t(
+                "hex(b\"00ff\") == \"0x00ff\" && hex(b\"\") == \"0x\" && bytes(hex(b\"abcd\")) == b\"abcd\"",
+            ),
+            (
+                vec!["hex(\"ab\")"],
+                Err(EvalError::Argument("hex", string("ab"))),
+            ),
             // an odd number of digits is padded, like in JSON
             (
                 vec!["bytes(\"0xabc\")"],
@@ -1342,13 +1409,6 @@ mod tests {
             (
                 vec!["bytes(\"0xzz\")"],
                 Err(EvalError::Argument("bytes", string("0xzz"))),
-            ),
-            (
-                vec!["selector(b\"00\")"],
-                Err(EvalError::Argument(
-                    "selector",
-                    Object::Bytes(vec![0].into()),
-                )),
             ),
             (
                 vec!["len(\"a\", \"b\")"],

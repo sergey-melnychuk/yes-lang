@@ -6,15 +6,15 @@
 //! The semantics are exactly those of the tree-walking interpreter in `eval.rs`
 //! (tests run both and compare the results).
 
-use std::cell::OnceCell;
+use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::builtin::Builtin;
 use crate::error::{Error, EvalError};
 use crate::eval::{
     CallDepthGuard, Context, Flow, Function, Limits, Object, at, eval, eval_eq, eval_index,
     eval_infix, eval_prefix, eval_slice, get_field, lookup, run_collecting,
 };
+use crate::native::Native;
 use crate::parser::{BlockScope, Expression, Operator, Statement, defines_functions};
 
 type Expr = Box<dyn Fn(&Context) -> Result<Object, EvalError>>;
@@ -247,29 +247,28 @@ fn compile_nested_expr(expr: &Expression) -> Expr {
             Box::new(move |ctx| Ok(make(ctx)))
         }
 
-        // a call of a builtin with literal arguments always gives the same result, so it
-        // is evaluated once, unless the name is bound (the builtin is shadowed)
+        // a call of a pure native with literal arguments always gives the same result, so it
+        // is evaluated once, as long as the name refers to the same native
         Expression::Apply(callee, args)
-            if matches!(callee.inner(), Expression::Var(name) if Builtin::from_name(name).is_some())
+            if matches!(callee.inner(), Expression::Var(_))
                 && args.iter().all(|arg| literal(arg).is_some()) =>
         {
-            let name = match callee.inner() {
-                Expression::Var(name) => name.clone(),
-                _ => unreachable!(),
-            };
-            let builtin = Builtin::from_name(&name).unwrap();
+            let callee = compile_expr(callee);
             let literals: Vec<Object> = args.iter().filter_map(literal).collect();
             let args = compile_exprs(args);
-            let cached: OnceCell<Object> = OnceCell::new();
-            Box::new(move |ctx| match ctx.get(&name) {
-                Some(obj) => call(obj, &args, ctx),
-                None => match cached.get() {
-                    Some(obj) => Ok(obj.clone()),
-                    None => {
-                        let obj = builtin.call(literals.clone(), &call_value)?;
-                        Ok(cached.get_or_init(|| obj).clone())
+            let cached: RefCell<Option<(Rc<Native>, Object)>> = RefCell::new(None);
+            Box::new(move |ctx| match callee(ctx)? {
+                Object::Native(native) if native.is_pure() => {
+                    if let Some((cached_native, obj)) = &*cached.borrow()
+                        && Rc::ptr_eq(cached_native, &native)
+                    {
+                        return Ok(obj.clone());
                     }
-                },
+                    let obj = native.call(literals.clone(), &call_value)?;
+                    *cached.borrow_mut() = Some((native, obj.clone()));
+                    Ok(obj)
+                }
+                f => call(f, &args, ctx),
             })
         }
 
@@ -350,7 +349,7 @@ fn call(callee: Object, args: &[Expr], ctx: &Context) -> Result<Object, EvalErro
             let _guard = CallDepthGuard::enter()?;
             run_fn(&f, &fn_ctx)
         }
-        Object::Builtin(b) => b.call(run_exprs(args, ctx)?, &call_value),
+        Object::Native(b) => b.call(run_exprs(args, ctx)?, &call_value),
         obj => Err(EvalError::NotFunction(obj)),
     }
 }
@@ -369,7 +368,7 @@ fn call_value(f: &Object, args: Vec<Object>) -> Result<Object, EvalError> {
             let _guard = CallDepthGuard::enter()?;
             run_fn(f, &fn_ctx)
         }
-        Object::Builtin(b) => b.call(args, &call_value),
+        Object::Native(b) => b.call(args, &call_value),
         obj => Err(EvalError::NotFunction(obj.clone())),
     }
 }
@@ -392,22 +391,51 @@ mod tests {
         Program::compile(src).unwrap()
     }
 
+    // a pure native that counts its calls
+    fn counting(calls: &Rc<std::cell::Cell<usize>>) -> Native {
+        let calls = calls.clone();
+        Native::pure("twice", 1, move |args| {
+            calls.set(calls.get() + 1);
+            match &args[0] {
+                Object::Int(x) => Ok(Object::Int(x * 2)),
+                arg => Err(EvalError::Argument("twice", arg.clone())),
+            }
+        })
+    }
+
     #[test]
-    fn test_cached_builtin_call() {
-        let p = program("selector(\"transfer(address,uint256)\")");
-        let selector = Ok(Object::Bytes(vec![0xa9, 0x05, 0x9c, 0xbb].into()));
-        assert_eq!(p.run(&Context::default()), selector);
-        // the cached result is used only while the builtin is not shadowed
+    fn test_cached_native_call() {
+        let calls = Rc::new(std::cell::Cell::new(0));
         let ctx = Context::default();
-        ctx.put("selector".to_string(), Object::Int(1.into()));
+        ctx.define(counting(&calls));
+        // a call with literal arguments is evaluated once, even over many runs
+        let p = program("twice(21) + twice(21)");
+        for _ in 0..3 {
+            assert_eq!(p.run(&ctx.fork()), Ok(Object::Int(84.into())));
+        }
+        assert_eq!(calls.get(), 2);
+        // with other arguments, it is called each time
+        let p = program("let x = 21; twice(x)");
+        p.run(&ctx.fork()).unwrap();
+        p.run(&ctx.fork()).unwrap();
+        assert_eq!(calls.get(), 4);
+
+        // the cached result is used only while the name refers to the same native
+        let p = program("twice(1)");
+        assert_eq!(p.run(&ctx), Ok(Object::Int(2.into())));
+        let other = Context::default();
+        other.define(counting(&calls));
+        assert_eq!(p.run(&other), Ok(Object::Int(2.into())));
+        assert_eq!(calls.get(), 6);
+        other.put("twice".to_string(), Object::Int(1.into()));
         assert_eq!(
-            p.run(&ctx).map_err(EvalError::without_position),
+            p.run(&other).map_err(EvalError::without_position),
             Err(EvalError::NotFunction(Object::Int(1.into())))
         );
-        assert_eq!(p.run(&Context::default()), selector);
 
-        let p = program("fn f(selector) { selector(\"a\") } f(len)");
-        assert_eq!(p.run(&Context::default()), Ok(Object::Int(1.into())));
+        // builtins are natives too
+        let p = program("fn f(g) { g(\"ab\") } f(len)");
+        assert_eq!(p.run(&Context::default()), Ok(Object::Int(2.into())));
 
         // errors are not cached
         let p = program("int(\"x\")");

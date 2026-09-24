@@ -3,7 +3,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use yes_lang::{Context, Limits, Program};
+use yes_lang::json::Json;
+use yes_lang::{Context, Limits, Program, eth};
 
 const TX: &str = include_str!("../../examples/tx.json");
 
@@ -20,7 +21,8 @@ fuzz_target!(|data: &[u8]| {
         max_calls: Some(10_000),
     };
     let ctx = Context::default();
-    ctx.bind("tx", TX).unwrap();
+    eth::define(&ctx);
+    ctx.bind("tx", Json::hex(TX)).unwrap();
     let compiled = program.run_once(ctx.fork(), limits);
     let tree = program.run_tree_walking(ctx.fork(), limits);
     // functions are compared by identity, so the results are compared by their debug output
@@ -31,7 +33,7 @@ fuzz_target!(|data: &[u8]| {
         src
     );
     if let Ok(obj) = compiled {
-        let _ = (obj.to_string(), yes_lang::to_json(&obj));
+        let _ = (obj.to_string(), yes_lang::json::to_json(&obj));
     }
     let _ = yes_lang::take_warnings();
 });

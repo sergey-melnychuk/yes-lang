@@ -24,6 +24,21 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  features:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # the language alone, and with each of the optional modules
+        features: ["", "json", "eth"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --lib --no-default-features --features "${{ matrix.features }}" -- -D warnings
+      - run: cargo test --lib --no-default-features --features "${{ matrix.features }}"
+
   msrv:
     runs-on: ubuntu-latest
     steps:

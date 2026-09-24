@@ -3,36 +3,49 @@ yes-lang
 
 ### Yet anothEr Scripting Language
 
-Simple interpreter in Rust:
-- "manual" tokenization
-- single-/multi-line comments
-- prefix & infix operators
-- Pratt parser impl, errors (also runtime ones) with line:column
-- tree-walking interpreter, and a compiler of the AST into closures (the one that runs)
-- lexically scoped bindings
-- functions as a first class citizens (closures, recursion)
-- arbitrary-precision integers ([num-bigint](https://crates.io/crates/num-bigint))
-- strings with escapes (`"a\"b\n"`) and raw hex bytes (`b"a9059cbb"`)
-- indexing `x[i]`, slicing `x[a..b]` (bounds are clamped), field access `x.name` / `x["name"]`
-- lists `[1, 2]`, records `{to: b"01", "any key": 2}`, membership `x in [1, 2]` / `"ell" in "hello"` / `"to" in tx`, `else if`
-- builtins: `len`, `int`, `bytes`, `keccak`, `selector`
-- JSON binding (`--bind:NAME=...`, `--stream:NAME`), `"0x..."` strings become bytes
-- lexer, parser, interpreter & REPL in <2k LoC (excluding tests)
+A small scripting language for rules over data, made to be embedded in Rust: predicates,
+filters and transforms that are safe to run even when somebody else wrote them. It comes with
+a command line tool for JSON (streams of Ethereum transactions and receipts, for example):
+
+```shell
+$ yes-lang examples/usdt.yes --stream:tx < examples/block.ndjson   # print the USDT transfers
+```
+
+The language is described in [LANG.md](LANG.md), ideas and plans are in [NOTES.md](NOTES.md).
+
+**The language**: lexically scoped closures and recursion, integers of arbitrary precision,
+floats, strings, bytes (`b"a9059cbb"`), lists and records (`{to: b"01", amount: 2}`), indexing,
+slicing and field access, membership (`x in [1, 2]`), `map`/`filter`/`any`/`all`, immutable
+values, no loops. Errors, also at runtime, point at their line and column.
+
+**Safe to run**: every run is limited (nested calls, calls per run, nesting of the source),
+the stack grows as needed so neither recursion nor nesting can crash the host, the memory of
+a run is freed after it (also cycles of closures), no IO, deterministic.
+
+**Data and Ethereum** (optional features): JSON in and out (`0x...` strings as bytes, or
+not), Keccak-256, selectors, ABI decoding of calldata (`abi`) and event logs (`event`).
+
+**Embedding**: compile once, run many times, bind JSON or values, add natives in Rust
+(`Native::pure`, `Native::new`); the language alone depends only on `num-bigint` and
+`stacker`.
+
+**Implementation**: a hand-written lexer, a Pratt parser, a tree-walking interpreter and a
+compiler of the syntax tree into closures (the one that runs): every test and every fuzzed
+program runs with both, and they must agree. ~3.3k lines of Rust without tests, ~7k with.
 
 Goals:
-- learn by doing
-- easy to understand
-- easy to implement
-- easy to follow
-- test coverage
+- easy to understand and to follow: the code is meant to be read
+- safe to run programs written by somebody else: bounded, deterministic, no crashes
+- easy to embed in Rust
+- correct: tests, differential testing of the two interpreters, fuzzing
+- useful for rules over data, Ethereum data in particular
 
 Non-goals:
-- IO
-- stdlib
-- safety
-- type-safety
-- production-readiness
-- usability in general
+- IO in the language: the host reads and writes, programs compute
+- a general-purpose language: no loops or mutation (see [NOTES.md](NOTES.md) for why and what
+  could change)
+- speed at any cost: no JIT, the time goes to JSON parsing anyway
+- a standard library of everything: builtins are few, the host adds natives
 
 #### Build
 
@@ -40,8 +53,9 @@ Non-goals:
 
 `cargo test`
 
-CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, the tests on stable and on the
-minimum supported version (1.88). Fuzzing: see [fuzz](fuzz/README.md).
+CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, the tests on stable, for the
+language alone and with each optional feature (`json`, `eth`), and on the minimum supported
+version (1.88). Fuzzing: see [fuzz](fuzz/README.md).
 
 ### Run
 
@@ -62,25 +76,40 @@ fn fib(n) {
 }
 
 // records are provided by the host, e.g. `tx` (see below)
+let transfer = abi(tx.input, "transfer(address to, uint256 amount)"); // null for other calls
+
 tx.to in [b"dac17f958d2ee523a2206206994597c13d831ec7", b"a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"]
-  && tx.input[..4] == selector("transfer(address,uint256)")
-  && int(tx.input[36..68]) >= 1000 * 1000000
+  && transfer != null && transfer.amount >= 1000 * 1000000
 ```
 
-Builtins:
+Builtins, in every program:
 
 | builtin | |
 |---|---|
 | `len(x)` | number of characters of a string, bytes, list items or record fields |
 | `int(x)` | integer from big-endian bytes (e.g. an ABI word), a decimal or a `"0x..."` string |
 | `bytes(x)` | bytes from a `"0x..."` hex string, or UTF-8 bytes of any other string |
-| `keccak(x)` | Keccak-256 of bytes or of a UTF-8 string |
-| `selector(s)` | function selector: `keccak(s)[..4]` |
+| `hex(b)` | bytes as a `"0x..."` hex string, e.g. to look up an address in a record |
 | `map(list, f)` | the list of `f(item)` for each item |
 | `filter(list, f)` | the items for which `f(item)` is `true` |
 | `any(list, f)`, `all(list, f)` | whether `f(item)` is `true` for any / all items (stop at the first that decides) |
 
 A builtin is used only when nothing is bound to its name, so `let len = 42;` is fine.
+
+Ethereum natives, with the `eth` feature (defined by the command line tool):
+
+| native | |
+|---|---|
+| `keccak(x)` | Keccak-256 of bytes or of a UTF-8 string |
+| `selector(s)` | function selector: `keccak(s)[..4]` |
+| `abi(calldata, "transfer(address to, uint256 amount)")` | the arguments of a call: `{to: b"...", amount: 30000000}`, `null` if the selector differs |
+| `abi_decode(data, "(address,uint256)")` | values encoded with the ABI |
+| `event(log, "Transfer(address indexed from, address indexed to, uint256 value)")` | the values of an event, `null` if the log is another event |
+
+Values with names in the signature are decoded into a record, without names into a list:
+all the types of the ABI (`address`, `bool`, `uint<N>`, `int<N>`, `bytes<N>`, `bytes`,
+`string`, arrays `T[]`, `T[k]`, tuples), nested in any way. Decoding is strict: invalid
+data (out of bounds, not padded, out of range) is an error, not a guess.
 
 Statements are separated by `;`, which is optional for the last statement of a block.
 `&&` and `||` short-circuit. Function calls are limited to 10k nested levels.
@@ -91,16 +120,17 @@ More examples: [closures](examples/closures.yes), [return](examples/return.yes),
 [logic](examples/logic.yes), [bigint](examples/bigint.yes), [strings](examples/strings.yes),
 [bytes](examples/bytes.yes), [equality](examples/equality.yes), [lists](examples/lists.yes),
 [records](examples/records.yes), [transfers](examples/transfers.yes) and [large](examples/large.yes)
-(ERC-20 transfers from the logs of [receipts](examples/receipts.ndjson)),
+(ERC-20 transfers from the logs of [receipts](examples/receipts.ndjson), with `event`),
 [erc20](examples/erc20.yes), [errors](examples/errors).
 All of them are run by `cargo test`, with both the tree-walking interpreter and the compiled closures.
 
 ### JSON & Ethereum transactions
 
 JSON is converted into records, lists, strings, numbers (arbitrary precision) and `null`.
-Every string starting with `0x` that is valid hex becomes bytes (an odd number of digits gets
-a leading zero: `"0x1"` is `b"01"`), so addresses, hashes and calldata can be compared with
-`b"..."` literals, and hex numbers are read with `int(...)`: `int(tx.value) > 0`.
+By default, the command line tool makes every string starting with `0x` that is valid hex
+bytes, as Ethereum JSON-RPC writes them (an odd number of digits gets a leading zero: `"0x1"`
+is `b"01"`), so addresses, hashes and calldata can be compared with `b"..."` literals, and hex
+numbers are read with `int(...)`: `int(tx.value) > 0`. With `--json:plain`, strings stay strings.
 
 ```shell
 # run a script with JSON bound to a name, from a file (@PATH) or inline
@@ -160,14 +190,27 @@ is `false` (a stream printed nothing), 2 on errors.
 
 ### Rust
 
+The language itself depends only on `num-bigint` and `stacker`. JSON (`json`) and Ethereum
+(`eth`) are optional modules, enabled by default: `default-features = false` for the language
+alone. Both are built on the same API a host can use to add its own natives.
+
 ```rust
-use yes_lang::{Context, Limits, Object, Program};
+use yes_lang::json::Json;
+use yes_lang::{Context, EvalError, Limits, Native, Object, Program, eth};
 
 let predicate = Program::compile("tx.to == b\"dac17f958d2ee523a2206206994597c13d831ec7\"")?;
 let ctx = Context::default();
-// JSON text, or a serde_json::Value
-ctx.bind("tx", r#"{"to": "0xdac17f958d2ee523a2206206994597c13d831ec7"}"#)?;
+// JSON text, or a serde_json::Value: 'Json::hex' makes "0x..." strings bytes
+ctx.bind("tx", Json::hex(r#"{"to": "0xdac17f958d2ee523a2206206994597c13d831ec7"}"#))?;
 assert_eq!(predicate.run(&ctx)?, Object::Bool(true));
+
+// natives: of Ethereum ('keccak', 'abi', ...), or your own
+eth::define(&ctx);
+ctx.define(Native::pure("double", 1, |args| match &args[0] {
+    Object::Int(x) => Ok(Object::Int(x * 2)),
+    arg => Err(EvalError::Argument("double", arg.clone())),
+}));
+assert_eq!(Program::compile("double(21)")?.run(&ctx)?, Object::Int(42.into()));
 
 // each run can be limited
 let limits = Limits { max_depth: 100, max_calls: Some(10_000) };
@@ -176,7 +219,7 @@ predicate.run_with(&ctx, limits)?;
 // for many inputs: bind each in a new scope, which is released after the run
 for tx in [r#"{"to": "0x01"}"#, r#"{"to": "0x02"}"#] {
     let scope = ctx.fork();
-    scope.bind("tx", tx)?;
+    scope.bind("tx", Json::hex(tx))?;
     assert_eq!(predicate.run_once(scope, limits)?, Object::Bool(false));
 }
 ```
@@ -185,7 +228,9 @@ for tx in [r#"{"to": "0x01"}"#, r#"{"to": "0x02"}"#] {
 context, like a REPL. `Program::run_once` releases the context after the run: use it for
 the items of a stream, so that nothing but the results is kept (a function bound in the
 scope it captures is a cycle, which is freed at the end of each run).
-`yes_lang::to_json` converts a result back to JSON.
+`yes_lang::json::to_json` converts a result back to JSON. `Native::pure` is for natives whose
+result depends only on the arguments: a call with literal arguments is evaluated once.
+`Native::new` gets a `Caller` to call functions passed to it (like `map`).
 
 `cargo test --release bench -- --ignored --nocapture` measures streaming on
 [block.ndjson](examples/block.ndjson): converting a transaction from JSON takes ~3.6µs

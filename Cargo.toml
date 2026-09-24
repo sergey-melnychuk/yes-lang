@@ -6,17 +6,28 @@ rust-version = "1.88"
 authors = ["sergey-melnychuk"]
 description = "Yet anothEr Scripting Language"
 license = "MIT"
-homepage = "https://github.com/sergey-melnychuk/yes-lang"
 repository = "https://github.com/sergey-melnychuk/yes-lang"
 documentation = "https://github.com/sergey-melnychuk/yes-lang"
 
 [dependencies]
 num-bigint = "0.5"
 num-traits = "0.2"
-serde = "1.0.229"
-serde_json = { version = "1.0.151", features = ["arbitrary_precision"] }
-sha3 = "0.12.0"
+serde = { version = "1.0.229", optional = true }
+serde_json = { version = "1.0.151", features = ["arbitrary_precision"], optional = true }
+sha3 = { version = "0.12.0", optional = true }
 stacker = "0.1.25"
+
+[features]
+default = ["json", "eth"]
+# JSON to objects and back
+json = ["dep:serde", "dep:serde_json"]
+# Ethereum natives: keccak, selector, abi, event
+eth = ["dep:sha3"]
+
+[[bin]]
+name = "yes-lang"
+path = "src/main.rs"
+required-features = ["json", "eth"]
 
 [profile.test]
 opt-level = 3

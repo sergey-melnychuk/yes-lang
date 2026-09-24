@@ -67,6 +67,8 @@ pub enum EvalError {
     StackOverflow(usize),
     CallLimit(u64),
     NotJson(Object),
+    /// A native failed, e.g. decoding invalid data.
+    Native(&'static str, String),
     Index(Object, Object),
     IndexOutOfBounds(BigInt, usize),
     Field(Object, String),
@@ -123,6 +125,7 @@ impl Display for EvalError {
             }
             EvalError::CallLimit(calls) => write!(f, "Call limit exceeded: {} calls", calls),
             EvalError::NotJson(obj) => write!(f, "Cannot convert '{}' to JSON", obj),
+            EvalError::Native(name, message) => write!(f, "'{}' failed: {}", name, message),
             EvalError::At(e, pos) => write!(f, "{} at {}", e, pos),
             EvalError::Index(obj, idx) => write!(f, "Cannot index '{}' with '{}'", obj, idx),
             EvalError::IndexOutOfBounds(idx, len) => {
@@ -141,6 +144,7 @@ pub enum Error {
     Parser(ParserError, Pos),
     Eval(EvalError),
     IO(std::io::Error),
+    #[cfg(feature = "json")]
     Json(serde_json::Error),
 }
 
@@ -151,6 +155,7 @@ impl Display for Error {
             Error::Parser(e, pos) => write!(f, "{} at {}", e, pos),
             Error::Eval(e) => write!(f, "{}", e),
             Error::IO(e) => write!(f, "{}", e),
+            #[cfg(feature = "json")]
             Error::Json(e) => write!(f, "Invalid JSON: {}", e),
         }
     }
@@ -170,6 +175,7 @@ impl From<std::io::Error> for Error {
     }
 }
 
+#[cfg(feature = "json")]
 impl From<serde_json::Error> for Error {
     fn from(e: serde_json::Error) -> Self {
         Self::Json(e)

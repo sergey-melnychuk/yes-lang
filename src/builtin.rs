@@ -1,178 +1,111 @@
+//! The builtins of the language: natives available in every program. A name refers to a
+//! builtin only when nothing is bound to it, so builtins can be shadowed (`let len = 42;`).
+
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use num_bigint::{BigInt, BigUint};
-use sha3::{Digest, Keccak256};
 
 use crate::error::EvalError;
 use crate::eval::Object;
-use crate::json::{parse_bytes, parse_quantity};
+use crate::hex::{encode, parse_bytes, parse_quantity};
+use crate::native::{Caller, Native};
 
-/// Calls a function value (a function or a builtin) with evaluated arguments: builtins
-/// like `map` call functions, each interpreter provides its own way to do it.
-pub(crate) type Caller<'a> = &'a dyn Fn(&Object, Vec<Object>) -> Result<Object, EvalError>;
-
-/// Functions implemented natively. A name refers to a builtin only when it is not bound
-/// in the scope, so builtins can be shadowed (e.g. `let len = 42;`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Builtin {
-    Len,
-    Int,
-    Bytes,
-    Keccak,
-    Selector,
-    Any,
-    All,
-    Map,
-    Filter,
+thread_local! {
+    static BUILTINS: HashMap<&'static str, Rc<Native>> = builtins()
+        .into_iter()
+        .map(|native| (native.name(), Rc::new(native)))
+        .collect();
 }
 
-impl Builtin {
-    pub(crate) fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "len" => Some(Builtin::Len),
-            "int" => Some(Builtin::Int),
-            "bytes" => Some(Builtin::Bytes),
-            "keccak" => Some(Builtin::Keccak),
-            "selector" => Some(Builtin::Selector),
-            "any" => Some(Builtin::Any),
-            "all" => Some(Builtin::All),
-            "map" => Some(Builtin::Map),
-            "filter" => Some(Builtin::Filter),
-            _ => None,
-        }
-    }
+/// The builtin with this name.
+pub(crate) fn builtin(name: &str) -> Option<Rc<Native>> {
+    BUILTINS.with(|builtins| builtins.get(name).cloned())
+}
 
-    pub fn name(&self) -> &'static str {
-        match self {
-            Builtin::Len => "len",
-            Builtin::Int => "int",
-            Builtin::Bytes => "bytes",
-            Builtin::Keccak => "keccak",
-            Builtin::Selector => "selector",
-            Builtin::Any => "any",
-            Builtin::All => "all",
-            Builtin::Map => "map",
-            Builtin::Filter => "filter",
-        }
-    }
-
-    fn arity(&self) -> usize {
-        match self {
-            Builtin::Any | Builtin::All | Builtin::Map | Builtin::Filter => 2,
-            _ => 1,
-        }
-    }
-
-    pub(crate) fn call(&self, args: Vec<Object>, caller: Caller) -> Result<Object, EvalError> {
-        if args.len() != self.arity() {
-            return Err(EvalError::ApplyArgsCount(self.arity(), args.len()));
-        }
-        let mut args = args.into_iter();
-        let arg = args.next().unwrap();
-        let invalid = |arg: Object| Err(EvalError::Argument(self.name(), arg));
-        if let Some(f) = args.next() {
-            // higher-order: a list and a function of an item
-            return match arg {
-                Object::List(items) => self.call_for_each(&items, &f, caller),
-                arg => invalid(arg),
+fn builtins() -> Vec<Native> {
+    vec![
+        // number of items: characters of a string, bytes, list items or record fields
+        Native::pure("len", 1, |args| match &args[0] {
+            Object::Str(s) => Ok(Object::Int(s.chars().count().into())),
+            Object::Bytes(b) => Ok(Object::Int(b.len().into())),
+            Object::List(items) => Ok(Object::Int(items.len().into())),
+            Object::Record(fields) => Ok(Object::Int(fields.len().into())),
+            arg => Err(EvalError::Argument("len", arg.clone())),
+        }),
+        // unsigned big-endian bytes (e.g. an ABI word), a decimal or a "0x..." hex string
+        Native::pure("int", 1, |args| {
+            let int = match &args[0] {
+                Object::Int(x) => Some(x.clone()),
+                Object::Bytes(b) => Some(BigInt::from(BigUint::from_bytes_be(b))),
+                Object::Str(s) if s.starts_with("0x") => parse_quantity(s),
+                Object::Str(s) => s.parse().ok(),
+                _ => None,
             };
-        }
-        match (self, arg) {
-            // number of items: characters of a string, bytes, list items or record fields
-            (Builtin::Len, Object::Str(s)) => Ok(Object::Int(s.chars().count().into())),
-            (Builtin::Len, Object::Bytes(b)) => Ok(Object::Int(b.len().into())),
-            (Builtin::Len, Object::List(items)) => Ok(Object::Int(items.len().into())),
-            (Builtin::Len, Object::Record(fields)) => Ok(Object::Int(fields.len().into())),
-
-            // unsigned big-endian bytes (e.g. an ABI word), a decimal or a "0x..." hex string
-            (Builtin::Int, Object::Int(x)) => Ok(Object::Int(x)),
-            (Builtin::Int, Object::Bytes(b)) => {
-                Ok(Object::Int(BigInt::from(BigUint::from_bytes_be(&b))))
-            }
-            (Builtin::Int, Object::Str(s)) => {
-                let int = if s.starts_with("0x") {
-                    parse_quantity(&s)
-                } else {
-                    s.parse().ok()
-                };
-                match int {
-                    Some(int) => Ok(Object::Int(int)),
-                    None => invalid(Object::Str(s)),
+            int.map(Object::Int)
+                .ok_or_else(|| EvalError::Argument("int", args[0].clone()))
+        }),
+        // a "0x..." hex string is decoded, any other string is taken as UTF-8
+        Native::pure("bytes", 1, |args| match &args[0] {
+            Object::Bytes(b) => Ok(Object::Bytes(b.clone())),
+            Object::Str(s) if s.starts_with("0x") => parse_bytes(s)
+                .map(|b| Object::Bytes(b.into()))
+                .ok_or_else(|| EvalError::Argument("bytes", args[0].clone())),
+            Object::Str(s) => Ok(Object::Bytes(s.as_bytes().to_vec().into())),
+            arg => Err(EvalError::Argument("bytes", arg.clone())),
+        }),
+        // bytes as a "0x..." hex string, e.g. to look up an address in a record
+        Native::pure("hex", 1, |args| match &args[0] {
+            Object::Bytes(b) => Ok(Object::Str(encode(b))),
+            arg => Err(EvalError::Argument("hex", arg.clone())),
+        }),
+        // a list and a function of an item; 'any' and 'all' stop at the first item that
+        // decides the result
+        Native::new("any", 2, |args, call| {
+            for item in list("any", &args[0])? {
+                if test(call, &args[1], item)? {
+                    return Ok(Object::Bool(true));
                 }
             }
-
-            // a "0x..." hex string is decoded, any other string is taken as UTF-8
-            (Builtin::Bytes, Object::Bytes(b)) => Ok(Object::Bytes(b)),
-            (Builtin::Bytes, Object::Str(s)) if s.starts_with("0x") => match parse_bytes(&s) {
-                Some(b) => Ok(Object::Bytes(b.into())),
-                None => invalid(Object::Str(s)),
-            },
-            (Builtin::Bytes, Object::Str(s)) => Ok(Object::Bytes(s.into_bytes().into())),
-
-            // Keccak-256 of bytes or of a UTF-8 string
-            (Builtin::Keccak, Object::Bytes(b)) => Ok(Object::Bytes(keccak(&b).into())),
-            (Builtin::Keccak, Object::Str(s)) => Ok(Object::Bytes(keccak(s.as_bytes()).into())),
-
-            // function selector: first 4 bytes of keccak of the signature
-            (Builtin::Selector, Object::Str(s)) => {
-                Ok(Object::Bytes(keccak(s.as_bytes())[..4].to_vec().into()))
+            Ok(Object::Bool(false))
+        }),
+        Native::new("all", 2, |args, call| {
+            for item in list("all", &args[0])? {
+                if !test(call, &args[1], item)? {
+                    return Ok(Object::Bool(false));
+                }
             }
+            Ok(Object::Bool(true))
+        }),
+        Native::new("map", 2, |args, call| {
+            let items = list("map", &args[0])?
+                .iter()
+                .map(|item| call(&args[1], vec![item.clone()]))
+                .collect::<Result<_, _>>()?;
+            Ok(Object::List(Rc::new(items)))
+        }),
+        Native::new("filter", 2, |args, call| {
+            let mut selected = Vec::new();
+            for item in list("filter", &args[0])? {
+                if test(call, &args[1], item)? {
+                    selected.push(item.clone());
+                }
+            }
+            Ok(Object::List(Rc::new(selected)))
+        }),
+    ]
+}
 
-            (_, arg) => invalid(arg),
-        }
+fn list<'a>(name: &'static str, arg: &'a Object) -> Result<&'a [Object], EvalError> {
+    match arg {
+        Object::List(items) => Ok(items),
+        arg => Err(EvalError::Argument(name, arg.clone())),
     }
 }
 
-impl Builtin {
-    fn call_for_each(
-        &self,
-        items: &[Object],
-        f: &Object,
-        caller: Caller,
-    ) -> Result<Object, EvalError> {
-        let test = |item: &Object| match caller(f, vec![item.clone()])? {
-            Object::Bool(b) => Ok(b),
-            obj => Err(EvalError::NotBoolean(obj)),
-        };
-        match self {
-            // 'any' and 'all' stop at the first item that decides the result
-            Builtin::Any => {
-                for item in items {
-                    if test(item)? {
-                        return Ok(Object::Bool(true));
-                    }
-                }
-                Ok(Object::Bool(false))
-            }
-            Builtin::All => {
-                for item in items {
-                    if !test(item)? {
-                        return Ok(Object::Bool(false));
-                    }
-                }
-                Ok(Object::Bool(true))
-            }
-            Builtin::Map => {
-                let items = items
-                    .iter()
-                    .map(|item| caller(f, vec![item.clone()]))
-                    .collect::<Result<_, _>>()?;
-                Ok(Object::List(Rc::new(items)))
-            }
-            Builtin::Filter => {
-                let mut selected = Vec::new();
-                for item in items {
-                    if test(item)? {
-                        selected.push(item.clone());
-                    }
-                }
-                Ok(Object::List(Rc::new(selected)))
-            }
-            _ => unreachable!("not a higher-order builtin: {}", self.name()),
-        }
+fn test(call: Caller, f: &Object, item: &Object) -> Result<bool, EvalError> {
+    match call(f, vec![item.clone()])? {
+        Object::Bool(b) => Ok(b),
+        obj => Err(EvalError::NotBoolean(obj)),
     }
-}
-
-fn keccak(data: &[u8]) -> Vec<u8> {
-    Keccak256::digest(data).to_vec()
 }

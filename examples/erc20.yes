@@ -4,30 +4,22 @@
 // Every "0x..." string of JSON is bytes: 'to', 'input', and also numbers like 'value' (use 'int')
 
 let USDT = b"dac17f958d2ee523a2206206994597c13d831ec7";
-let TRANSFER = selector("transfer(address,uint256)"); // b"a9059cbb"
 
-// i-th 32-byte ABI argument of the calldata
+// the arguments of the call, 'null' for a call of another function
+let transfer = abi(tx.input, "transfer(address to, uint256 amount)");
+
+// the same by hand: a 4-byte selector, then 32-byte words of the arguments
 fn arg(data, i) { data[4 + 32 * i..4 + 32 * (i + 1)] }
 
-let recipient = arg(tx.input, 0)[12..]; // an address is the last 20 bytes of a word
-let amount = int(arg(tx.input, 1));     // USDT has 6 decimals
-
-// the same decoding by hand: big-endian bytes to integer
-fn uint(bytes) {
-  if bytes == b"" { return 0; }
-  uint(bytes[..len(bytes) - 1]) * 256 + bytes[len(bytes) - 1]
-}
-
 tx.to == USDT
-&& tx.input[..4] == TRANSFER
-&& len(tx.input) == 4 + 2 * 32
-&& recipient == b"850e38706b9419c18c6a1312de24e2511a598db9"
-&& amount == 30 * 1000000 // 30 USDT
-&& uint(arg(tx.input, 1)) == amount
+&& transfer == {to: b"850e38706b9419c18c6a1312de24e2511a598db9", amount: 30 * 1000000} // 30 USDT
+&& tx.input[..4] == selector("transfer(address,uint256)")
+&& arg(tx.input, 0)[12..] == transfer.to // an address is the last 20 bytes of a word
+&& int(arg(tx.input, 1)) == transfer.amount
+&& abi(tx.input, "approve(address,uint256)") == null
 && int(tx.value) == 0
 && int(tx.chainId) == 1
 && int(tx.blockNumber) == 26040477
-&& tx.chainId == b"01"
 && tx.accessList == []
 && tx.authorizationList == null // a missing field is null
 && "hash" in tx && !("authorizationList" in tx)

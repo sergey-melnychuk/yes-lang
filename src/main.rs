@@ -2,7 +2,8 @@ use std::env::args;
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
-use yes_lang::{Context, Error, Limits, Object, Program, is_identifier, take_warnings, to_json};
+use yes_lang::json::{Json, Strings, to_json};
+use yes_lang::{Context, Error, Limits, Object, Program, eth, is_identifier, take_warnings};
 
 const USAGE: &str = "usage: yes-lang [FILE] [OPTIONS]
 
@@ -15,6 +16,8 @@ const USAGE: &str = "usage: yes-lang [FILE] [OPTIONS]
 options:
   --bind:NAME=JSON               bind JSON (converted to records, lists, ...) to NAME
   --bind:NAME=@PATH              bind JSON from the file at PATH to NAME
+  --json:plain                   keep \"0x...\" strings of JSON as strings (by default they
+                                 become bytes, as in Ethereum JSON-RPC)
   --count                        (stream) print the number of outputs instead of them
   --max-calls:N                  stop a run after N function calls (default: no limit,
                                  1000000 per line of a stream)
@@ -37,14 +40,30 @@ const OK: u8 = 0;
 const FALSE: u8 = 1;
 const ERROR: u8 = 2;
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct Options {
     file: Option<String>,
     binds: Vec<(String, String)>,
     stream: Option<String>,
     count: bool,
+    strings: Strings,
     limits: Limits,
     debug: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            file: None,
+            binds: vec![],
+            stream: None,
+            count: false,
+            // the tool is made for Ethereum JSON-RPC
+            strings: Strings::Hex,
+            limits: Limits::default(),
+            debug: false,
+        }
+    }
 }
 
 fn parse_args(args: &[String]) -> Result<Options, String> {
@@ -64,6 +83,8 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             options.stream = Some(name.to_string());
         } else if arg == "--count" {
             options.count = true;
+        } else if arg == "--json:plain" {
+            options.strings = Strings::Plain;
         } else if let Some(value) = arg.strip_prefix("--max-calls:") {
             options.limits.max_calls = Some(number(value, arg)?);
         } else if let Some(value) = arg.strip_prefix("--max-depth:") {
@@ -94,10 +115,10 @@ fn parse_bind(bind: &str) -> Result<(String, String), String> {
 }
 
 /// Binds JSON text, or JSON from a file if the value is '@PATH'.
-fn bind(ctx: &Context, name: &str, value: &str) -> Result<(), Error> {
+fn bind(ctx: &Context, name: &str, value: &str, strings: Strings) -> Result<(), Error> {
     match value.strip_prefix('@') {
-        Some(path) => ctx.bind(name, std::fs::read_to_string(path)?),
-        None => ctx.bind(name, value),
+        Some(path) => ctx.bind(name, Json::new(std::fs::read_to_string(path)?, strings)),
+        None => ctx.bind(name, Json::new(value, strings)),
     }
 }
 
@@ -116,8 +137,9 @@ fn run() -> u8 {
     };
 
     let ctx = Context::default();
+    eth::define(&ctx);
     for (name, value) in &options.binds {
-        if let Err(e) = bind(&ctx, name, value) {
+        if let Err(e) = bind(&ctx, name, value, options.strings) {
             eprintln!("Error: --bind:{}: {}", name, e);
             return ERROR;
         }
@@ -177,11 +199,12 @@ fn apply(
     name: &str,
     line: &str,
     limits: Limits,
+    strings: Strings,
 ) -> Result<Option<String>, Error> {
     // each line is bound in its own scope, so lines do not see each other, and the scope
     // is released after the run
     let ctx = ctx.fork();
-    ctx.bind(name, line)?;
+    ctx.bind(name, Json::new(line, strings))?;
     Ok(match program.run_once(ctx, limits)? {
         Object::Bool(true) => Some(line.to_string()),
         Object::Bool(false) | Object::Null => None,
@@ -211,7 +234,14 @@ fn run_stream(program: &Program, ctx: &Context, name: &str, options: &Options) -
         if line.trim().is_empty() {
             continue;
         }
-        match apply(program, ctx, name, &line, stream_limits(options)) {
+        match apply(
+            program,
+            ctx,
+            name,
+            &line,
+            stream_limits(options),
+            options.strings,
+        ) {
             Ok(Some(output)) => {
                 outputs += 1;
                 if !options.count && writeln!(out, "{}", output).is_err() {
@@ -260,7 +290,7 @@ fn run_repl(ctx: &Context, options: &Options) {
             compile_file(path).and_then(|p| Ok(p.run_with(ctx, options.limits)?))
         } else if let Some(arg) = line.strip_prefix(":bind ") {
             match parse_bind(arg) {
-                Ok((name, value)) => match bind(ctx, &name, &value) {
+                Ok((name, value)) => match bind(ctx, &name, &value, options.strings) {
                     Ok(()) => println!("bound '{}'", name),
                     Err(e) => eprintln!("Error: {}", e),
                 },
@@ -295,6 +325,13 @@ mod tests {
         std::fs::read_to_string(path).unwrap()
     }
 
+    // a context like the one of the tool: with the Ethereum natives
+    fn context() -> Context {
+        let ctx = Context::default();
+        eth::define(&ctx);
+        ctx
+    }
+
     fn program(src: &str) -> Program {
         Program::compile(src).unwrap()
     }
@@ -305,26 +342,33 @@ mod tests {
         name: &str,
         line: &str,
     ) -> Result<Option<String>, Error> {
-        apply(program, ctx, name, line, Limits::default())
+        apply(program, ctx, name, line, Limits::default(), Strings::Hex)
     }
 
     #[test]
     fn test_bind() {
         let ctx = Context::default();
         let value = serde_json::json!({"to": "0x00", "n": 1});
-        ctx.bind("a", r#"{"to": "0x00"}"#).unwrap();
-        ctx.bind("b", r#"[1, 2]"#.to_string()).unwrap();
-        ctx.bind("c", &value).unwrap();
-        ctx.bind("d", value).unwrap();
+        ctx.bind("a", Json::hex(r#"{"to": "0x00"}"#)).unwrap();
+        ctx.bind("b", Json::hex(r#"[1, 2]"#.to_string())).unwrap();
+        ctx.bind("c", Json::hex(&value)).unwrap();
+        ctx.bind("d", Json::hex(value.clone())).unwrap();
+        // without 'Json::hex', strings stay strings
+        ctx.bind("p", r#"{"to": "0x00"}"#).unwrap();
+        ctx.bind("q", &value).unwrap();
         ctx.bind("e", Object::Int(42.into())).unwrap();
-        bind(&ctx, "f", "@examples/tx.json").unwrap();
-        bind(&ctx, "g", "\"@not a file\"").unwrap();
+        bind(&ctx, "f", "@examples/tx.json", Strings::Hex).unwrap();
+        bind(&ctx, "g", "\"@not a file\"", Strings::Hex).unwrap();
         let src = "a.to == b\"00\" && b == [1, 2] && c == d && c.n == 1 && e == 42 \
-                   && f.to == b\"dac17f958d2ee523a2206206994597c13d831ec7\" && g == \"@not a file\"";
+                   && f.to == b\"dac17f958d2ee523a2206206994597c13d831ec7\" && g == \"@not a file\" \
+                   && p.to == \"0x00\" && q.to == \"0x00\"";
         assert_eq!(program(src).run(&ctx), Ok(Object::Bool(true)));
 
         assert!(matches!(ctx.bind("x", "{"), Err(Error::Json(_))));
-        assert!(matches!(bind(&ctx, "x", "@nope.json"), Err(Error::IO(_))));
+        assert!(matches!(
+            bind(&ctx, "x", "@nope.json", Strings::Hex),
+            Err(Error::IO(_))
+        ));
     }
 
     #[test]
@@ -350,6 +394,7 @@ mod tests {
                 ],
                 stream: Some("t".to_string()),
                 count: true,
+                strings: Strings::Hex,
                 limits: Limits {
                     max_depth: 50,
                     max_calls: Some(100),
@@ -380,8 +425,7 @@ mod tests {
             .lines()
             .enumerate()
             .filter(|(_, line)| {
-                apply_to(&predicate, &Context::default(), "tx", line).unwrap()
-                    == Some(line.to_string())
+                apply_to(&predicate, &context(), "tx", line).unwrap() == Some(line.to_string())
             })
             .map(|(i, _)| i)
             .collect();
@@ -397,12 +441,7 @@ mod tests {
             receipts
                 .lines()
                 .enumerate()
-                .map(|(i, line)| {
-                    (
-                        i,
-                        apply_to(&program, &Context::default(), "receipt", line).unwrap(),
-                    )
-                })
+                .map(|(i, line)| (i, apply_to(&program, &context(), "receipt", line).unwrap()))
                 .collect()
         };
         // 17 transfers of USDC and USDT, at most one per receipt
@@ -458,7 +497,7 @@ mod tests {
     fn test_stream_binds() {
         // the program sees other bindings, each line is bound in its own scope
         let ctx = Context::default();
-        bind(&ctx, "tokens", r#"["0x01", "0x02"]"#).unwrap();
+        bind(&ctx, "tokens", r#"["0x01", "0x02"]"#, Strings::Hex).unwrap();
         let predicate = program("tx.to in tokens");
         assert!(apply_to(&predicate, &ctx, "t", r#"{}"#).is_err());
         assert!(
@@ -487,13 +526,30 @@ mod tests {
         // an exponential program is stopped on each line
         let fib = program("fn fib(n) { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } } fib(x.n)");
         let limits = stream_limits(&args(&["f.yes", "--stream:x"]).unwrap());
-        match apply(&fib, &Context::default(), "x", r#"{"n": 40}"#, limits) {
+        match apply(
+            &fib,
+            &Context::default(),
+            "x",
+            r#"{"n": 40}"#,
+            limits,
+            Strings::Hex,
+        ) {
             Err(Error::Eval(e)) => {
                 assert_eq!(e.without_position(), EvalError::CallLimit(STREAM_MAX_CALLS))
             }
             result => panic!("unexpected: {:?}", result),
         }
-        assert!(apply(&fib, &Context::default(), "x", r#"{"n": 10}"#, limits).is_ok());
+        assert!(
+            apply(
+                &fib,
+                &Context::default(),
+                "x",
+                r#"{"n": 10}"#,
+                limits,
+                Strings::Hex
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -517,16 +573,16 @@ mod tests {
             max_calls: Some(10),
         };
         assert!(
-            apply(&predicate, &ctx, "tx", r#"{"n": 5}"#, limits)
+            apply(&predicate, &ctx, "tx", r#"{"n": 5}"#, limits, Strings::Hex)
                 .unwrap()
                 .is_some()
         );
-        match apply(&predicate, &ctx, "tx", r#"{"n": 50}"#, limits) {
+        match apply(&predicate, &ctx, "tx", r#"{"n": 50}"#, limits, Strings::Hex) {
             Err(Error::Eval(e)) => assert_eq!(e.without_position(), EvalError::CallLimit(10)),
             result => panic!("unexpected: {:?}", result),
         }
         assert!(
-            apply(&predicate, &ctx, "tx", r#"{"n": 5}"#, limits)
+            apply(&predicate, &ctx, "tx", r#"{"n": 5}"#, limits, Strings::Hex)
                 .unwrap()
                 .is_some()
         );

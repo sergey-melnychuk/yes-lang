@@ -30,3 +30,10 @@ bench = false
 [dependencies.serde_json]
 version = "1"
 features = ["arbitrary_precision"]
+
+[[bin]]
+name = "abi"
+path = "fuzz_targets/abi.rs"
+test = false
+doc = false
+bench = false

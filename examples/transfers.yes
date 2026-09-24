@@ -7,33 +7,19 @@
 //
 // expect: [{"amount": 3300000000, "from": "0xc54f706f1faff6b22621e9d7a77e650c13a2fbfa", "to": "0xa3c2a287f7408d4abd34c00b47fc39f3bac324e4", "token": "USDT"}]
 
-// event Transfer(address indexed from, address indexed to, uint256 value)
-let TRANSFER = keccak("Transfer(address,address,uint256)");
+let TOKENS = {
+  "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": "USDC",
+  "0xdac17f958d2ee523a2206206994597c13d831ec7": "USDT",
+};
 
-let TOKENS = [
-  {symbol: "USDC", address: b"a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},
-  {symbol: "USDT", address: b"dac17f958d2ee523a2206206994597c13d831ec7"},
-];
-
-fn token(address) {
-  let found = filter(TOKENS, fn(t) { t.address == address });
-  if found == [] { null } else { found[0].symbol }
+// 'null' for other events, and for ERC-721 transfers: the same signature, but the token id
+// is indexed too
+fn transfer(log) {
+  let symbol = TOKENS[hex(log.address)];
+  let t = event(log, "Transfer(address indexed from, address indexed to, uint256 amount)");
+  if symbol == null || t == null { return null; }
+  {token: symbol, from: t.from, to: t.to, amount: t.amount}
 }
 
-// ERC-721 transfers have the same signature, but the token id is indexed (4 topics)
-fn is_transfer(log) {
-  len(log.topics) == 3 && log.topics[0] == TRANSFER && token(log.address) != null
-}
-
-// indexed addresses are the last 20 bytes of 32-byte topics, the amount is in the data
-fn decode(log) {
-  {
-    token: token(log.address),
-    from: log.topics[1][12..],
-    to: log.topics[2][12..],
-    amount: int(log.data),
-  }
-}
-
-let transfers = map(filter(receipt.logs, is_transfer), decode);
+let transfers = filter(map(receipt.logs, transfer), fn(t) { t != null });
 if transfers == [] { null } else { transfers }

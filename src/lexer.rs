@@ -1,6 +1,6 @@
 use crate::buffer::Iterable;
 use crate::error::TokenError;
-use crate::json::decode_hex;
+use crate::hex::decode_hex;
 use crate::token::*;
 
 fn match_operator(next: char, peek: Option<char>) -> Result<Token, TokenError> {

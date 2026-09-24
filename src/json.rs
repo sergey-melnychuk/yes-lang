@@ -1,121 +1,104 @@
+//! JSON to objects and back.
+
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use num_bigint::BigInt;
-use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
-use crate::error::EvalError;
-use crate::eval::{Bytes, Object};
+use crate::error::{Error, EvalError};
+use crate::eval::{IntoObject, Object};
+use crate::hex::{encode, parse_shared_bytes};
 
-fn hex_digit(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
+/// How JSON strings are converted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Strings {
+    /// Strings stay strings.
+    #[default]
+    Plain,
+    /// "0x..." hex strings become bytes (an odd number of digits gets a leading zero: "0x1" is
+    /// `b"01"`), as addresses, hashes, calldata and numbers are written in Ethereum JSON-RPC.
+    Hex,
+}
+
+/// JSON to bind with `Context::bind`: text or a `serde_json::Value`, with the way to convert
+/// its strings. Text and values bound as they are (without `Json`) are converted as `Plain`.
+pub struct Json<T> {
+    json: T,
+    strings: Strings,
+}
+
+impl<T> Json<T> {
+    pub fn new(json: T, strings: Strings) -> Self {
+        Json { json, strings }
+    }
+
+    pub fn plain(json: T) -> Self {
+        Json::new(json, Strings::Plain)
+    }
+
+    pub fn hex(json: T) -> Self {
+        Json::new(json, Strings::Hex)
     }
 }
 
-/// Decodes an even number of hex digits (without '0x').
-pub(crate) fn decode_hex(hex: &str) -> Option<Vec<u8>> {
-    let hex = hex.as_bytes();
-    if !hex.len().is_multiple_of(2) {
-        return None;
-    }
-    hex.as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| Some(hex_digit(pair[0])? << 4 | hex_digit(pair[1])?))
-        .collect()
-}
-
-/// Decodes a "0x..." hex string like `parse_bytes`, into a single allocation.
-fn parse_shared_bytes(s: &str) -> Option<Bytes> {
-    let hex = s.strip_prefix("0x")?.as_bytes();
-    if !hex.iter().all(u8::is_ascii_hexdigit) {
-        return None;
-    }
-    let digit = |c: u8| hex_digit(c).expect("validated");
-    // an odd number of digits: the first byte has one digit
-    let (first, rest) = hex.split_at(hex.len() % 2);
-    // with an exact size known upfront, collecting allocates once
-    let bytes: Rc<[u8]> = first
-        .iter()
-        .map(|&c| digit(c))
-        .chain(
-            rest.as_chunks::<2>()
-                .0
-                .iter()
-                .map(|[hi, lo]| digit(*hi) << 4 | digit(*lo)),
-        )
-        .collect();
-    Some(bytes.into())
-}
-
-/// Decodes a "0x..." hex string, an odd number of digits is padded with a leading zero
-/// (numbers are written like that, e.g. "0x1").
-pub(crate) fn parse_bytes(s: &str) -> Option<Vec<u8>> {
-    let hex = s.strip_prefix("0x")?;
-    if hex.len().is_multiple_of(2) {
-        decode_hex(hex)
-    } else {
-        decode_hex(&format!("0{}", hex))
+impl IntoObject for Json<&str> {
+    fn into_object(self) -> Result<Object, Error> {
+        Ok(parse_json(self.json, self.strings)?)
     }
 }
 
-pub(crate) fn parse_quantity(s: &str) -> Option<BigInt> {
-    let hex = s.strip_prefix("0x")?;
-    // from_str_radix and parse_bytes would also accept a sign or '_'
-    if hex.is_empty() || !hex.bytes().all(|c| c.is_ascii_hexdigit()) {
-        return None;
+impl IntoObject for Json<String> {
+    fn into_object(self) -> Result<Object, Error> {
+        Ok(parse_json(&self.json, self.strings)?)
     }
-    // fast path: most quantities (gas, nonce, ...) fit into 64 bits
-    if hex.len() <= 16 {
-        return u64::from_str_radix(hex, 16).ok().map(BigInt::from);
-    }
-    BigInt::parse_bytes(hex.as_bytes(), 16)
 }
 
-/// A value that can be bound to a name with `Context::bind`: JSON text, a parsed JSON value
-/// (both converted with `from_json`), or an object as it is.
-pub trait IntoObject {
-    fn into_object(self) -> Result<Object, serde_json::Error>;
+impl IntoObject for Json<&Value> {
+    fn into_object(self) -> Result<Object, Error> {
+        Ok(from_json(self.json, self.strings))
+    }
+}
+
+impl IntoObject for Json<Value> {
+    fn into_object(self) -> Result<Object, Error> {
+        Ok(from_json(&self.json, self.strings))
+    }
 }
 
 impl IntoObject for &str {
-    fn into_object(self) -> Result<Object, serde_json::Error> {
-        // directly into an object, without building a `serde_json::Value` first
-        Ok(serde_json::from_str::<Json>(self)?.0)
+    fn into_object(self) -> Result<Object, Error> {
+        Json::plain(self).into_object()
     }
 }
 
 impl IntoObject for String {
-    fn into_object(self) -> Result<Object, serde_json::Error> {
-        self.as_str().into_object()
+    fn into_object(self) -> Result<Object, Error> {
+        Json::plain(self).into_object()
     }
 }
 
 impl IntoObject for &Value {
-    fn into_object(self) -> Result<Object, serde_json::Error> {
-        Ok(from_json(self))
+    fn into_object(self) -> Result<Object, Error> {
+        Json::plain(self).into_object()
     }
 }
 
 impl IntoObject for Value {
-    fn into_object(self) -> Result<Object, serde_json::Error> {
-        Ok(from_json(&self))
+    fn into_object(self) -> Result<Object, Error> {
+        Json::plain(self).into_object()
     }
 }
 
-impl IntoObject for Object {
-    fn into_object(self) -> Result<Object, serde_json::Error> {
-        Ok(self)
-    }
+/// Parses JSON text directly into an object, the same as `from_json` would give, without
+/// building a `serde_json::Value` first.
+pub fn parse_json(text: &str, strings: Strings) -> Result<Object, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let obj = JsonSeed(strings).deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(obj)
 }
-
-/// An object deserialized directly from JSON, the same as `from_json` would give.
-struct Json(Object);
 
 // with the 'arbitrary_precision' feature, serde_json passes a number to a deserializer
 // as a map with this single key and the number as a string
@@ -128,22 +111,28 @@ fn number(text: &str) -> Object {
     }
 }
 
-fn string(s: &str) -> Object {
-    match parse_shared_bytes(s) {
-        Some(bytes) => Object::Bytes(bytes),
-        None => Object::Str(s.to_string()),
+fn string(s: &str, strings: Strings) -> Object {
+    match strings {
+        Strings::Hex => match parse_shared_bytes(s) {
+            Some(bytes) => Object::Bytes(bytes),
+            None => Object::Str(s.to_string()),
+        },
+        Strings::Plain => Object::Str(s.to_string()),
     }
 }
 
-impl<'de> Deserialize<'de> for Json {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(JsonVisitor).map(Json)
+#[derive(Clone, Copy)]
+struct JsonSeed(Strings);
+
+impl<'de> DeserializeSeed<'de> for JsonSeed {
+    type Value = Object;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Object, D::Error> {
+        deserializer.deserialize_any(self)
     }
 }
 
-struct JsonVisitor;
-
-impl<'de> Visitor<'de> for JsonVisitor {
+impl<'de> Visitor<'de> for JsonSeed {
     type Value = Object;
 
     fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -171,12 +160,12 @@ impl<'de> Visitor<'de> for JsonVisitor {
     }
 
     fn visit_str<E>(self, s: &str) -> Result<Object, E> {
-        Ok(string(s))
+        Ok(string(s, self.0))
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Object, A::Error> {
         let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-        while let Some(Json(item)) = seq.next_element()? {
+        while let Some(item) = seq.next_element_seed(self)? {
             items.push(item);
         }
         Ok(Object::List(Rc::new(items)))
@@ -188,27 +177,27 @@ impl<'de> Visitor<'de> for JsonVisitor {
             if name == NUMBER_TOKEN && fields.is_empty() {
                 return Ok(number(&map.next_value::<String>()?));
             }
-            let Json(value) = map.next_value()?;
-            fields.insert(name, value);
+            fields.insert(name, map.next_value_seed(self)?);
         }
         Ok(Object::Record(Rc::new(fields)))
     }
 }
 
-/// Converts JSON into an object: every "0x..." hex string is decoded into `Bytes`
-/// (use `int(...)` for numbers), any other string is kept as `Str`.
-pub fn from_json(value: &Value) -> Object {
+/// Converts a JSON value into an object.
+pub fn from_json(value: &Value, strings: Strings) -> Object {
     match value {
         Value::Null => Object::Null,
         Value::Bool(b) => Object::Bool(*b),
         // with 'arbitrary_precision' the number keeps its exact text
         Value::Number(n) => number(&n.to_string()),
-        Value::String(s) => string(s),
-        Value::Array(items) => Object::List(Rc::new(items.iter().map(from_json).collect())),
+        Value::String(s) => string(s, strings),
+        Value::Array(items) => Object::List(Rc::new(
+            items.iter().map(|item| from_json(item, strings)).collect(),
+        )),
         Value::Object(fields) => Object::Record(Rc::new(
             fields
                 .iter()
-                .map(|(name, value)| (name.clone(), from_json(value)))
+                .map(|(name, value)| (name.clone(), from_json(value, strings)))
                 .collect::<BTreeMap<_, _>>(),
         )),
     }
@@ -231,10 +220,7 @@ fn to_nested_json(obj: &Object) -> Result<Value, EvalError> {
             None => return Err(EvalError::NotJson(obj.clone())),
         },
         Object::Str(s) => Value::String(s.clone()),
-        Object::Bytes(b) => {
-            let hex: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
-            Value::String(format!("0x{}", hex))
-        }
+        Object::Bytes(b) => Value::String(encode(b)),
         Object::List(items) => Value::Array(items.iter().map(to_json).collect::<Result<_, _>>()?),
         Object::Record(fields) => Value::Object(
             fields
@@ -242,7 +228,7 @@ fn to_nested_json(obj: &Object) -> Result<Value, EvalError> {
                 .map(|(name, value)| Ok((name.clone(), to_json(value)?)))
                 .collect::<Result<_, EvalError>>()?,
         ),
-        Object::Func(_) | Object::Builtin(_) => return Err(EvalError::NotJson(obj.clone())),
+        Object::Func(_) | Object::Native(_) => return Err(EvalError::NotJson(obj.clone())),
     })
 }
 
@@ -336,10 +322,10 @@ mod tests {
         ];
 
         for (json, expected) in tests {
-            assert_eq!(from_json(&json), expected, "{}", json);
+            assert_eq!(from_json(&json, Strings::Hex), expected, "{}", json);
             // deserialized directly from the text, the object is the same
             assert_eq!(
-                json.to_string().into_object().unwrap(),
+                parse_json(&json.to_string(), Strings::Hex).unwrap(),
                 expected,
                 "{}",
                 json
@@ -357,7 +343,12 @@ mod tests {
         ];
         for text in texts {
             let value: Value = serde_json::from_str(text).unwrap();
-            assert_eq!(text.into_object().unwrap(), from_json(&value), "{}", text);
+            assert_eq!(
+                parse_json(text, Strings::Hex).unwrap(),
+                from_json(&value, Strings::Hex),
+                "{}",
+                text
+            );
         }
         // the transactions of a block
         for line in std::fs::read_to_string("examples/block.ndjson")
@@ -365,27 +356,28 @@ mod tests {
             .lines()
         {
             let value: Value = serde_json::from_str(line).unwrap();
-            assert_eq!(line.into_object().unwrap(), from_json(&value));
+            assert_eq!(
+                parse_json(line, Strings::Hex).unwrap(),
+                from_json(&value, Strings::Hex)
+            );
         }
-        assert!("{".into_object().is_err());
-        assert!("1 2".into_object().is_err());
+        assert!(parse_json("{", Strings::Plain).is_err());
+        assert!(parse_json("1 2", Strings::Plain).is_err());
     }
 
     #[test]
     fn test_to_json() {
         let src =
             r#"{"a":[1,-2.5,true,null,"s","0x00ff"],"big":123456789012345678901234567890,"b":{}}"#;
-        let obj = from_json(&serde_json::from_str(src).unwrap());
+        let obj = from_json(&serde_json::from_str(src).unwrap(), Strings::Hex);
         // keys are sorted
         let expected =
             r#"{"a":[1,-2.5,true,null,"s","0x00ff"],"b":{},"big":123456789012345678901234567890}"#;
         assert_eq!(to_json(&obj).unwrap().to_string(), expected);
-        assert_eq!(
-            to_json(&Object::Builtin(crate::Builtin::Len)),
-            Err(EvalError::NotJson(Object::Builtin(crate::Builtin::Len)))
-        );
+        let native = Object::Native(Rc::new(crate::Native::pure("f", 0, |_| Ok(Object::Null))));
+        assert_eq!(to_json(&native), Err(EvalError::NotJson(native.clone())));
         // JSON has no infinity: a number too big for a float cannot be converted back
-        let inf = "22e2222".into_object().unwrap();
+        let inf = parse_json("22e2222", Strings::Plain).unwrap();
         assert_eq!(inf, Object::Float(f64::INFINITY));
         assert_eq!(to_json(&inf), Err(EvalError::NotJson(inf.clone())));
         assert!(to_json(&Object::Float(f64::NAN)).is_err());

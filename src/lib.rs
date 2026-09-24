@@ -1,11 +1,12 @@
 //! yes-lang: Yet anothEr Scripting Language.
 //!
 //! ```
-//! use yes_lang::{Context, Object, Program};
+//! use yes_lang::{Context, Object, Program, json::Json};
 //!
 //! let predicate = Program::compile("tx.to == b\"dac17f958d2ee523a2206206994597c13d831ec7\"")?;
 //! let ctx = Context::default();
-//! ctx.bind("tx", r#"{"to": "0xdac17f958d2ee523a2206206994597c13d831ec7"}"#)?;
+//! // "0x..." strings of JSON as bytes
+//! ctx.bind("tx", Json::hex(r#"{"to": "0xdac17f958d2ee523a2206206994597c13d831ec7"}"#))?;
 //! assert_eq!(predicate.run(&ctx)?, Object::Bool(true));
 //! # Ok::<(), yes_lang::Error>(())
 //! ```
@@ -15,16 +16,23 @@ mod builtin;
 mod compile;
 mod error;
 mod eval;
-mod json;
+mod hex;
 mod lexer;
+mod native;
 mod parser;
 mod token;
 
-pub use builtin::Builtin;
+/// Ethereum: Keccak-256, selectors, ABI decoding (the 'eth' feature).
+#[cfg(feature = "eth")]
+pub mod eth;
+/// JSON to objects and back (the 'json' feature).
+#[cfg(feature = "json")]
+pub mod json;
+
 pub use compile::Program;
 pub use error::{Error, EvalError, ParserError, TokenError};
-pub use eval::{Bytes, Context, Function, Limits, Object, take_warnings};
-pub use json::{IntoObject, from_json, to_json};
+pub use eval::{Bytes, Context, Function, IntoObject, Limits, Object, take_warnings};
+pub use native::{Caller, Native};
 pub use parser::Operator;
 pub use token::{Pos, Token, is_identifier};
 
@@ -56,6 +64,8 @@ pub(crate) fn parse_source(code: &str) -> Result<Vec<Statement>, Error> {
 pub(crate) mod tests {
     use super::*;
     use crate::eval::{eval, with_limits};
+    #[cfg(all(feature = "json", feature = "eth"))]
+    use crate::json::{Json, to_json};
     use std::path::Path;
 
     pub(crate) const LIMITS: Limits = Limits {
@@ -68,6 +78,7 @@ pub(crate) mod tests {
     }
 
     // '--bind:NAME=VALUE' options in the comments of an example (e.g. in its 'cargo run' line)
+    #[cfg(all(feature = "json", feature = "eth"))]
     fn declared_binds(src: &str) -> Vec<(String, String)> {
         src.lines()
             .filter(|line| line.trim_start().starts_with("//"))
@@ -81,6 +92,7 @@ pub(crate) mod tests {
     }
 
     // the result an example declares with '// expect: JSON', 'true' by default
+    #[cfg(all(feature = "json", feature = "eth"))]
     fn expected_result(src: &str) -> serde_json::Value {
         src.lines()
             .find_map(|line| line.trim_start().strip_prefix("// expect:"))
@@ -91,6 +103,7 @@ pub(crate) mod tests {
     // every example must evaluate to its expected result (see above), with the bindings
     // it declares in its comments
     #[test]
+    #[cfg(all(feature = "json", feature = "eth"))]
     fn test_examples() {
         let mut files: Vec<_> = std::fs::read_dir("examples")
             .unwrap()
@@ -104,13 +117,15 @@ pub(crate) mod tests {
             let name = file.display().to_string();
             let result = {
                 let src = read(&file);
+                // like the command line tool: with the Ethereum natives, "0x..." as bytes
                 let ctx = Context::default();
+                eth::define(&ctx);
                 for (name, value) in declared_binds(&src) {
                     let json = match value.strip_prefix('@') {
                         Some(path) => read(path),
                         None => value,
                     };
-                    ctx.bind(&name, json).unwrap();
+                    ctx.bind(&name, Json::hex(json)).unwrap();
                 }
                 // both the tree-walking interpreter and compiled closures are run
                 let ast = parse_source(&src).unwrap();
@@ -290,7 +305,7 @@ pub(crate) mod tests {
             "if true { let y = 1; let f = fn() { y }; f() }",
         ];
         let base = Context::default();
-        base.bind("tx", r#"{"to": "0x01"}"#).unwrap();
+        base.bind("tx", Object::Int(1.into())).unwrap();
         for src in programs {
             let program = Program::compile(src).unwrap();
             let live = eval::live_scopes();
@@ -377,11 +392,12 @@ pub(crate) mod tests {
 }
 
 // cargo test --release bench -- --ignored --nocapture
-#[cfg(test)]
+#[cfg(all(test, feature = "json", feature = "eth"))]
 mod bench {
     use super::tests::read;
     use super::*;
     use crate::eval::eval;
+    use crate::json::{Strings, from_json, parse_json};
     use std::time::Instant;
 
     const ROUNDS: usize = 2000;
@@ -398,7 +414,7 @@ mod bench {
             .collect();
         let txs = lines
             .iter()
-            .map(|line| line.as_str().into_object().unwrap())
+            .map(|line| parse_json(line, Strings::Hex).unwrap())
             .collect();
         (lines, txs)
     }
@@ -413,12 +429,13 @@ mod bench {
         let started = Instant::now();
         for _ in 0..ROUNDS {
             for line in &lines {
-                std::hint::black_box(line.as_str().into_object().unwrap());
+                std::hint::black_box(parse_json(line, Strings::Hex).unwrap());
             }
         }
         report("JSON -> Object", count, started);
 
         let ctx = Context::default();
+        eth::define(&ctx);
         let started = Instant::now();
         let mut matched = 0;
         for _ in 0..ROUNDS {
@@ -470,7 +487,7 @@ mod bench {
         let started = Instant::now();
         for _ in 0..ROUNDS {
             for value in &values {
-                std::hint::black_box(from_json(value));
+                std::hint::black_box(from_json(value, Strings::Hex));
             }
         }
         report("Value -> Object only", count, started);
@@ -490,6 +507,7 @@ mod bench {
         ] {
             let program = Program::compile(src).unwrap();
             let ctx = Context::default();
+            eth::define(&ctx);
             let started = Instant::now();
             for _ in 0..ROUNDS {
                 for tx in &txs {
